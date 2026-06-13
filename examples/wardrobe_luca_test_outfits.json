@@ -1,0 +1,17 @@
+[
+  {
+    "outfit_id": "luca_test_001",
+    "description": "dark navy fitted crew neck sweater, clean and modern, no logos",
+    "test_goal": "Validate simple dark top for recurring clean-card grammar scenes."
+  },
+  {
+    "outfit_id": "luca_test_002",
+    "description": "off-white shirt under a navy unstructured jacket, smart casual, no logos",
+    "test_goal": "Validate layered smart-casual jacket look for host-led grammar explanation."
+  },
+  {
+    "outfit_id": "luca_test_003",
+    "description": "deep green polo shirt, clean collar, premium cotton, no logos",
+    "test_goal": "Validate simple green polo look for reusable clean educational host scenes."
+  }
+]

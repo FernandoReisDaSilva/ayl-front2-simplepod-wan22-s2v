@@ -1,0 +1,33 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local caches
+.DS_Store
+__pycache__/
+*.pyc
+node_modules/
+.venv/
+venv/
+
+# Heavy media assets
+*.wav
+*.mp3
+*.mp4
+*.mov
+*.webm
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Logs / outputs
+logs/
+outputs/
+tmp/
+
+# Google Drive production folders should not be committed
+AYL_Production/

@@ -1,0 +1,56 @@
+TASK
+Create a short Wan 2.7 image-to-video base clip from the supplied wardrobe image.
+
+MODEL FAMILY
+Wan 2.7 image-to-video via Replicate Web
+
+FALLBACK
+Use Wan 2.1 image-to-video via Replicate Web only if Wan 2.7 is unavailable.
+
+SOURCE IMAGE
+/Users/fernandoreisdasilva/Library/CloudStorage/GoogleDrive-fernandoreisdasilva@gmail.com/Meu Drive/AYL_Production/04_video_jobs/TEST_WARDROBE_WAN_0001/video_base/replicate_inputs/source_images/luca_wan_v3.png
+
+TARGET
+Duration: 4-5 seconds.
+Shot type: stable talking-head base.
+Motion: minimal natural presenter stillness only, loop-friendly.
+Mouth: closed or neutral unless the model offers explicit audio/lip-sync readiness controls.
+Use case: future audio and lip-sync pipeline readiness.
+
+IDENTITY LOCK
+Preserve Luca's exact identity from the source image.
+Preserve face shape, age impression, skin tone, hairline, hairstyle, eyes, nose, mouth, jawline, facial proportions, and body proportions.
+Keep the outfit, framing, lighting, and clean educational visual package consistent with the source image.
+Do not make Luca look like a different person.
+
+VISUAL PACKAGE
+visual_package: clean-card-grammar
+thumbnail_style: host-right-grammar-contrast
+primary_character: luca
+
+WARDROBE TEST
+outfit_id: luca_test_002
+description: off-white shirt under a navy unstructured jacket, smart casual, no logos
+test_goal: Validate layered smart-casual jacket look for host-led grammar explanation.
+
+MOTION DIRECTION
+Keep head and shoulders mostly still.
+Allow only subtle breathing, tiny posture settling, and very small eye blinks.
+Keep hands out of frame or still if visible.
+No gesturing.
+No head turns.
+No camera movement.
+No zoom.
+No dramatic expression change.
+No mouth opening.
+
+BACKGROUND AND OUTPUT
+Clean simple educational background.
+No text.
+No logos.
+No extra people.
+No new props.
+No flags or national symbols.
+No motion blur.
+No distorted face, teeth, hands, or clothing edges.
+Produce a stable, loop-friendly base clip suitable for later audio/lip-sync review.

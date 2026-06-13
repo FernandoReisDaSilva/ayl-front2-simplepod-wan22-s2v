@@ -1,0 +1,3 @@
+Create a natural presenter idle video of Luca from the source image, 5 seconds, square 1:1. Luca should feel alive, attentive, warm, mildly pleased, and ready to speak. Preserve Luca identity and wardrobe. Mouth closed or softly neutral. No speaking. No hand gestures. No face distortion.
+
+Let the model expand this into a natural motion plan: visible breathing, small natural head movement, relaxed eye contact, one blink, mild facial liveliness, a tiny natural mini-smile, smooth controlled presenter presence, and subtle lighting or framing variation if needed for believable motion.

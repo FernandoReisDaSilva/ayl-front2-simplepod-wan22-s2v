@@ -1,0 +1,89 @@
+TASK
+Create Run 5 of the Wan 2.7 image-to-video base clip from the supplied Luca V3 wardrobe image.
+
+RUN LABEL
+luca_test_002_wan27_base_motion_005
+
+MODEL FAMILY
+Wan 2.7 image-to-video via Replicate API
+
+SOURCE IMAGE
+/Users/fernandoreisdasilva/Library/CloudStorage/GoogleDrive-fernandoreisdasilva@gmail.com/Meu Drive/AYL_Production/04_video_jobs/TEST_WARDROBE_WAN_0001/video_base/replicate_inputs/source_images/luca_wan_v3.png
+
+TARGET
+Duration: 5 seconds.
+Aspect ratio: 1:1 character base asset for internal Remotion use inside a 16:9 composition.
+Resolution: 720p.
+Shot type: stable talking-head base.
+Motion goal: a more alive, attentive, slightly pleased presenter idle clip, still usable as a character base asset.
+Mouth: closed or softly neutral.
+Use case: future audio and lip-sync pipeline readiness.
+
+RUN 4 OBSERVATION TO CORRECT
+Identity was preserved.
+Face was preserved.
+Wardrobe was preserved.
+Mouth stayed neutral.
+Movement still felt frozen.
+No breathing was visible.
+No head movement was visible.
+Blink was less natural because eyes looked down after blinking.
+Expression felt too neutral and passive.
+
+IDENTITY LOCK
+Preserve Luca's exact identity from the source image.
+Preserve face shape, age impression, skin tone, hairline, hairstyle, eyes, nose, mouth, jawline, facial proportions, and body proportions.
+Preserve Luca's face, hair, wardrobe, lighting, and 1:1 framing.
+Preserve the outfit: off-white shirt under a navy unstructured jacket, smart casual, no logos.
+Do not make Luca look like a different person.
+
+VISUAL PACKAGE
+visual_package: clean-card-grammar
+thumbnail_style: host-right-grammar-contrast
+primary_character: luca
+
+WARDROBE TEST
+outfit_id: luca_test_002
+description: off-white shirt under a navy unstructured jacket, smart casual, no logos
+test_goal: Validate layered smart-casual jacket look for host-led grammar explanation.
+
+MOTION DIRECTION
+Luca looks attentive, calm, mildly pleased, and ready to speak.
+Use natural human idle movement, clearly visible but not exaggerated.
+Show visible breathing through shoulders and upper chest.
+Use slight head movement: gentle micro-nod, small tilt, subtle return to center.
+Use small natural eye movement looking at the viewer, not down.
+Use one natural blink only.
+Add mild facial liveliness: relaxed eyes, slightly warmer expression, tiny cheek movement.
+Use very subtle posture adjustment, as if he is settling before speaking.
+Shoulders may shift slightly with breathing.
+Movement should be visible enough to avoid a frozen image.
+Keep movement smooth, slow, controlled, and stable.
+Remain centered.
+
+STRICT NEGATIVE MOTION RULES
+No speaking.
+No lip-sync.
+Mouth closed or softly neutral.
+No mouth opening.
+No broad smile.
+No dramatic emotion.
+No hand gestures.
+No body turn.
+No strong head turn.
+No camera movement.
+No zoom.
+No background change.
+No face distortion.
+No looking down after blink.
+
+BACKGROUND AND OUTPUT
+Clean simple educational background.
+No text.
+No logos.
+No extra people.
+No new props.
+No flags or national symbols.
+No motion blur.
+No distorted face, teeth, hands, or clothing edges.
+Produce a stable 1:1 character base clip that feels alive and attentive without creating lip-sync conflict.

@@ -1,0 +1,77 @@
+TASK
+Create Run 3 of the Wan 2.7 image-to-video base clip from the supplied Luca V3 wardrobe image.
+
+RUN LABEL
+luca_test_002_wan27_base_motion_003
+
+MODEL FAMILY
+Wan 2.7 image-to-video via Replicate API
+
+SOURCE IMAGE
+/Users/fernandoreisdasilva/Library/CloudStorage/GoogleDrive-fernandoreisdasilva@gmail.com/Meu Drive/AYL_Production/04_video_jobs/TEST_WARDROBE_WAN_0001/video_base/replicate_inputs/source_images/luca_wan_v3.png
+
+TARGET
+Duration: 5 seconds.
+Aspect ratio: 1:1 character base asset for internal Remotion use inside a 16:9 composition.
+Resolution: 720p.
+Shot type: stable talking-head base.
+Motion goal: calm presenter presence with enough natural life to avoid a frozen character, without creating lip-sync conflict.
+Mouth: closed or neutral.
+Use case: future audio and lip-sync pipeline readiness.
+
+RUN 2 OBSERVATION TO CORRECT
+Identity was preserved.
+Face was preserved.
+Wardrobe was preserved.
+There was one natural blink.
+Mouth stayed closed.
+Loop was stable.
+Movement was too minimal and slightly unnatural because the character still felt frozen.
+
+IDENTITY LOCK
+Preserve Luca's exact identity from the source image.
+Preserve face shape, age impression, skin tone, hairline, hairstyle, eyes, nose, mouth, jawline, facial proportions, and body proportions.
+Preserve the outfit: off-white shirt under a navy unstructured jacket, smart casual, no logos.
+Preserve the 1:1 framing and clean educational presenter composition.
+Do not make Luca look like a different person.
+
+VISUAL PACKAGE
+visual_package: clean-card-grammar
+thumbnail_style: host-right-grammar-contrast
+primary_character: luca
+
+WARDROBE TEST
+outfit_id: luca_test_002
+description: off-white shirt under a navy unstructured jacket, smart casual, no logos
+test_goal: Validate layered smart-casual jacket look for host-led grammar explanation.
+
+MOTION DIRECTION
+Calm presenter presence.
+Subtle natural breathing visible in shoulders and chest.
+One or two natural blinks.
+Tiny eye movement.
+Very slight head micro-nod, almost imperceptible.
+Subtle posture settling.
+Remain centered and stable.
+
+STRICT NEGATIVE MOTION RULES
+No speaking.
+Mouth closed or neutral.
+No smile change.
+No hand gestures.
+No head turn.
+No camera movement.
+No zoom.
+No mouth opening.
+No dramatic expression change.
+
+BACKGROUND AND OUTPUT
+Clean simple educational background.
+No text.
+No logos.
+No extra people.
+No new props.
+No flags or national symbols.
+No motion blur.
+No distorted face, teeth, hands, or clothing edges.
+Produce a stable 1:1 character base clip with natural presenter presence and no lip-sync conflict.
