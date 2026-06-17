@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Target image tag. Replace OWNER before pushing."
+        description: "Target image tag."
         required: true
-        default: "ghcr.io/OWNER/ayl-latentsync-runpod:0.1.0"
+        default: "ghcr.io/fernandoreisdasilva/ayl-latentsync-runpod:0.1.1"
         type: string
       download_checkpoints:
         description: "Download and embed LatentSync checkpoints during build."

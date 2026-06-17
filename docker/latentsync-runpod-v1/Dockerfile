@@ -12,6 +12,7 @@ ENV PATH=/opt/latentsync-venv/bin:$PATH
 ENV HF_HOME=/opt/hf-cache
 ENV PIP_NO_CACHE_DIR=1
 ENV PYTHONUNBUFFERED=1
+ENV DOWNLOAD_CHECKPOINTS=${DOWNLOAD_CHECKPOINTS}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -41,6 +42,11 @@ WORKDIR /opt/LatentSync
 
 RUN python -m pip install -r requirements.txt \
     && python -m pip install boto3
+
+RUN mkdir -p /opt/ayl
+COPY docker/latentsync-runpod-v1/entrypoint.sh /opt/ayl/entrypoint.sh
+COPY docker/latentsync-runpod-v1/runtime_probe.py /opt/ayl/runtime_probe.py
+RUN chmod +x /opt/ayl/entrypoint.sh
 
 RUN if [ "$DOWNLOAD_CHECKPOINTS" = "1" ]; then \
         huggingface-cli download ByteDance/LatentSync-1.6 whisper/tiny.pt --local-dir checkpoints; \
@@ -75,4 +81,5 @@ for name in modules:
 print("torch", torch.__version__, "cuda", torch.version.cuda)
 PY
 
-CMD ["bash", "-lc", "cd /opt/LatentSync && python - <<'PY'\nimport torch\nprint('LatentSync image ready')\nprint('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())\nPY\nsleep infinity"]
+ENTRYPOINT ["/opt/ayl/entrypoint.sh"]
+CMD ["idle"]
