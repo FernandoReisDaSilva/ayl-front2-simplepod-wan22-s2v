@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,19 @@ from pathlib import Path
 TEST_PREFIX = "tests/runpod_latentsync_image_v1_1"
 DEFAULT_PROGRESS_KEY = f"{TEST_PREFIX}/progress/container_started.json"
 DEFAULT_FINAL_KEY = f"{TEST_PREFIX}/output/final_report.json"
+DEFAULT_SMOKE_UNET_KEY = "checkpoints/latentsync/latentsync_unet.pt"
+DEFAULT_SMOKE_WHISPER_KEY = "checkpoints/latentsync/whisper/tiny.pt"
+DEFAULT_SMOKE_VIDEO_KEY = "tests/runpod_latentsync_smoke_run_0001/input/video.mp4"
+DEFAULT_SMOKE_AUDIO_KEY = "tests/runpod_latentsync_smoke_run_0001/input/audio.wav"
+DEFAULT_SMOKE_OUTPUT_KEY = "tests/runpod_latentsync_smoke_run_0001/output/video_out.mp4"
+LATENTSYNC_ROOT = Path("/opt/LatentSync")
+SMOKE_PATHS = {
+    "unet": LATENTSYNC_ROOT / "checkpoints" / "latentsync_unet.pt",
+    "whisper": LATENTSYNC_ROOT / "checkpoints" / "whisper" / "tiny.pt",
+    "video": Path("/workspace/input/video.mp4"),
+    "audio": Path("/workspace/input/audio.wav"),
+    "output": Path("/workspace/output/video_out.mp4"),
+}
 LATENTSYNC_PATH_CANDIDATES = (
     "/workspace/LatentSync",
     "/opt/LatentSync",
@@ -35,6 +49,11 @@ def env_presence() -> dict:
         "AYL_IMAGE_TAG",
         "R2_PROGRESS_KEY",
         "R2_FINAL_REPORT_KEY",
+        "R2_CHECKPOINT_UNET_KEY",
+        "R2_CHECKPOINT_WHISPER_KEY",
+        "R2_INPUT_VIDEO_KEY",
+        "R2_INPUT_AUDIO_KEY",
+        "R2_OUTPUT_VIDEO_KEY",
         *R2_ENV_KEYS,
     )
     return {key: bool(os.getenv(key, "")) for key in keys}
@@ -65,9 +84,28 @@ def upload_json(key: str, payload: dict) -> None:
     r2_client().upload_file(str(path), os.environ["R2_BUCKET"], key)
 
 
-def base_report(mode: str) -> dict:
+def download_r2_file(key: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    r2_client().download_file(os.environ["R2_BUCKET"], key, str(destination))
+
+
+def upload_r2_file(source: Path, key: str) -> None:
+    r2_client().upload_file(str(source), os.environ["R2_BUCKET"], key)
+
+
+def file_facts(path: Path) -> dict:
+    exists = path.exists()
     return {
-        "test_id": "TEST_RUNPOD_LATENTSYNC_IMAGE_V1_1_ENTRYPOINT_PROBE",
+        "path": str(path),
+        "exists": exists,
+        "size_bytes": path.stat().st_size if exists else 0,
+    }
+
+
+def base_report(mode: str) -> dict:
+    smoke_mode = mode == "latentsync_smoke_run"
+    return {
+        "test_id": "TEST_RUNPOD_LATENTSYNC_SMOKE_RUN_0001" if smoke_mode else "TEST_RUNPOD_LATENTSYNC_IMAGE_V1_1_ENTRYPOINT_PROBE",
         "mode": mode,
         "timestamp": now_iso(),
         "hostname": socket.gethostname(),
@@ -77,8 +115,8 @@ def base_report(mode: str) -> dict:
         "marker_nonce": os.getenv("AYL_MARKER_NONCE", ""),
         "env_present_redacted": env_presence(),
         "download_checkpoints": os.getenv("DOWNLOAD_CHECKPOINTS", "0"),
-        "no_checkpoint_downloads": True,
-        "no_inference": True,
+        "no_checkpoint_downloads": not smoke_mode,
+        "no_inference": not smoke_mode,
     }
 
 
@@ -120,6 +158,142 @@ def torch_probe() -> dict:
 
 def latentsync_paths() -> dict:
     return {path: Path(path).exists() for path in LATENTSYNC_PATH_CANDIDATES}
+
+
+def smoke_r2_keys() -> dict:
+    return {
+        "checkpoint_unet": os.getenv("R2_CHECKPOINT_UNET_KEY", DEFAULT_SMOKE_UNET_KEY),
+        "checkpoint_whisper": os.getenv("R2_CHECKPOINT_WHISPER_KEY", DEFAULT_SMOKE_WHISPER_KEY),
+        "input_video": os.getenv("R2_INPUT_VIDEO_KEY", DEFAULT_SMOKE_VIDEO_KEY),
+        "input_audio": os.getenv("R2_INPUT_AUDIO_KEY", DEFAULT_SMOKE_AUDIO_KEY),
+        "output_video": os.getenv("R2_OUTPUT_VIDEO_KEY", DEFAULT_SMOKE_OUTPUT_KEY),
+    }
+
+
+def smoke_inference_command() -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "scripts.inference",
+        "--unet_config_path",
+        "configs/unet/stage2_512.yaml",
+        "--inference_ckpt_path",
+        "checkpoints/latentsync_unet.pt",
+        "--inference_steps",
+        "20",
+        "--guidance_scale",
+        "1.5",
+        "--enable_deepcache",
+        "--video_path",
+        str(SMOKE_PATHS["video"]),
+        "--audio_path",
+        str(SMOKE_PATHS["audio"]),
+        "--video_out_path",
+        str(SMOKE_PATHS["output"]),
+    ]
+
+
+def run_smoke_report(mode: str) -> dict:
+    report = base_report(mode)
+    r2_keys = smoke_r2_keys()
+    command = smoke_inference_command()
+    paths = {name: str(path) for name, path in SMOKE_PATHS.items()}
+
+    report.update(
+        {
+            "probe_scope": "latentsync_functional_smoke_run",
+            "r2_input_keys": r2_keys,
+            "container_paths": paths,
+            "inference_command": command,
+            "latentsync_root": str(LATENTSYNC_ROOT),
+        }
+    )
+
+    download_r2_file(r2_keys["checkpoint_unet"], SMOKE_PATHS["unet"])
+    download_r2_file(r2_keys["checkpoint_whisper"], SMOKE_PATHS["whisper"])
+    checkpoint_facts = {
+        "unet": file_facts(SMOKE_PATHS["unet"]),
+        "whisper": file_facts(SMOKE_PATHS["whisper"]),
+    }
+    write_progress(mode, "checkpoint_download_done", {"checkpoint_files": checkpoint_facts})
+
+    download_r2_file(r2_keys["input_video"], SMOKE_PATHS["video"])
+    download_r2_file(r2_keys["input_audio"], SMOKE_PATHS["audio"])
+    input_facts = {
+        "video": file_facts(SMOKE_PATHS["video"]),
+        "audio": file_facts(SMOKE_PATHS["audio"]),
+    }
+    write_progress(mode, "input_download_done", {"input_files": input_facts})
+
+    SMOKE_PATHS["output"].parent.mkdir(parents=True, exist_ok=True)
+    write_progress(mode, "inference_started", {"inference_command": command})
+    started_at = now_iso()
+    completed = subprocess.run(
+        command,
+        cwd=str(LATENTSYNC_ROOT),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=float(os.getenv("AYL_LATENTSYNC_SMOKE_INFERENCE_TIMEOUT_SECONDS", "900")),
+        check=False,
+    )
+    finished_at = now_iso()
+    inference_result = {
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "returncode": completed.returncode,
+        "stdout_tail": completed.stdout[-4000:],
+        "stderr_tail": completed.stderr[-4000:],
+        "output_file": file_facts(SMOKE_PATHS["output"]),
+    }
+    write_progress(mode, "inference_done", {"inference_result": inference_result})
+
+    if completed.returncode != 0:
+        report.update(
+            {
+                "runtime_probe_status": "inference_failed",
+                "checkpoint_files": checkpoint_facts,
+                "input_files": input_facts,
+                "inference_result": inference_result,
+                "output_upload_status": "not_attempted",
+            }
+        )
+        return report
+
+    if not SMOKE_PATHS["output"].exists():
+        report.update(
+            {
+                "runtime_probe_status": "output_missing",
+                "checkpoint_files": checkpoint_facts,
+                "input_files": input_facts,
+                "inference_result": inference_result,
+                "output_upload_status": "not_attempted",
+            }
+        )
+        return report
+
+    upload_r2_file(SMOKE_PATHS["output"], r2_keys["output_video"])
+    output_facts = file_facts(SMOKE_PATHS["output"])
+    write_progress(
+        mode,
+        "output_upload_done",
+        {
+            "r2_output_video_key": r2_keys["output_video"],
+            "output_file": output_facts,
+        },
+    )
+    report.update(
+        {
+            "runtime_probe_status": "ok",
+            "checkpoint_files": checkpoint_facts,
+            "input_files": input_facts,
+            "inference_result": inference_result,
+            "output_file": output_facts,
+            "r2_output_video_key": r2_keys["output_video"],
+            "output_upload_status": "ok",
+        }
+    )
+    return report
 
 
 def build_report(mode: str) -> dict:
@@ -169,6 +343,8 @@ def build_report(mode: str) -> dict:
                 "latentsync_path_exists": path_exists,
             }
         )
+    elif mode == "latentsync_smoke_run":
+        report = run_smoke_report(mode)
     else:
         raise RuntimeError(f"Unsupported runtime probe mode: {mode}")
     return report
@@ -178,19 +354,39 @@ def run(mode: str) -> int:
     print(f"[AYL_RUNTIME_PROBE] start mode={mode}", flush=True)
     write_progress(mode, "container_started")
     final_key = os.getenv("R2_FINAL_REPORT_KEY", DEFAULT_FINAL_KEY)
-    report = build_report(mode)
+    try:
+        report = build_report(mode)
+    except Exception as exc:
+        report = base_report(mode)
+        report.update(
+            {
+                "runtime_probe_status": "failed",
+                "error_truncated": str(exc)[:2000],
+            }
+        )
+        if mode == "latentsync_smoke_run":
+            report.update(
+                {
+                    "probe_scope": "latentsync_functional_smoke_run",
+                    "r2_input_keys": smoke_r2_keys(),
+                    "container_paths": {name: str(path) for name, path in SMOKE_PATHS.items()},
+                    "inference_command": smoke_inference_command(),
+                    "output_upload_status": "not_attempted",
+                }
+            )
     report["r2_progress_key"] = os.getenv("R2_PROGRESS_KEY", DEFAULT_PROGRESS_KEY)
     report["r2_final_report_key"] = final_key
     report["r2_upload_status"] = "ok"
     upload_json(final_key, report)
     write_progress(mode, "final_report_written", {"r2_final_report_key": final_key})
-    print(f"[AYL_RUNTIME_PROBE] done mode={mode} status=ok", flush=True)
-    return 0
+    status = report.get("runtime_probe_status", "ok")
+    print(f"[AYL_RUNTIME_PROBE] done mode={mode} status={status}", flush=True)
+    return 0 if status == "ok" else 1
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AYL LatentSync RunPod image runtime probe.")
-    parser.add_argument("--mode", choices=("r2_probe", "latentsync_probe"), required=True)
+    parser.add_argument("--mode", choices=("r2_probe", "latentsync_probe", "latentsync_smoke_run"), required=True)
     return parser.parse_args()
 
 

@@ -24,6 +24,10 @@ case "$MODE" in
     python /opt/ayl/runtime_probe.py --mode latentsync_probe
     STATUS="ok"
     ;;
+  latentsync_smoke_run)
+    python /opt/ayl/runtime_probe.py --mode latentsync_smoke_run
+    STATUS="ok"
+    ;;
   latentsync_run)
     echo "[AYL_ENTRYPOINT] latentsync_run reserved" >&2
     STATUS="reserved"
