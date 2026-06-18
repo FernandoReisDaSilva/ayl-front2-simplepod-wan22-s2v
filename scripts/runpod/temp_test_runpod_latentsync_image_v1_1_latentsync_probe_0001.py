@@ -3,6 +3,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -25,7 +26,7 @@ DEFAULT_GPU_TYPE_ID = "NVIDIA GeForce RTX 3090"
 DEFAULT_CLOUD_TYPE = "COMMUNITY"
 DEFAULT_POD_NAME = "ayl-test-latentsync-image-v1-1-latentsync-probe-0001"
 DEFAULT_IMAGE_TAG = "ghcr.io/fernandoreisdasilva/ayl-latentsync-runpod:0.1.8"
-DEFAULT_CONTAINER_DISK_GB = 20
+DEFAULT_CONTAINER_DISK_GB = 40
 R2_PROGRESS_KEY = "tests/runpod_latentsync_image_v1_1_latentsync_probe_0001/progress/container_started.json"
 R2_FINAL_REPORT_KEY = "tests/runpod_latentsync_image_v1_1_latentsync_probe_0001/output/final_report.json"
 REQUIRED_FINAL_REPORT_FIELDS = (
@@ -103,6 +104,12 @@ def sanitize_string(value: str) -> str:
 def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def reset_output_dir() -> None:
+    if OUTPUT_DIR.exists():
+        shutil.rmtree(OUTPUT_DIR)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def load_repo_dotenv() -> None:
@@ -248,6 +255,9 @@ def intended_payload(args: argparse.Namespace, marker_nonce: str) -> dict:
         "template_id": args.template_id,
         "pod_name": args.pod_name,
         "container_disk_gb": args.container_disk_gb,
+        "max_wait_seconds": args.max_wait_seconds,
+        "poll_interval_seconds": args.poll_interval_seconds,
+        "request_timeout_seconds": args.timeout_seconds,
         "dry_run_default": True,
         "requires_execute_flag": True,
         "requires_confirm_cost_risk_flag": True,
@@ -334,6 +344,9 @@ def build_log(args: argparse.Namespace, **values) -> dict:
         "template_id_requested": args.template_id,
         "pod_name_requested": args.pod_name,
         "container_disk_gb": args.container_disk_gb,
+        "max_wait_seconds": args.max_wait_seconds,
+        "poll_interval_seconds": args.poll_interval_seconds,
+        "request_timeout_seconds": args.timeout_seconds,
         "network_volume_required": False,
         "dockerArgs_used": False,
         "r2_progress_key": R2_PROGRESS_KEY,
@@ -344,6 +357,7 @@ def build_log(args: argparse.Namespace, **values) -> dict:
 
 
 def run(args: argparse.Namespace) -> int:
+    reset_output_dir()
     created_at = now_iso()
     marker_nonce = f"nonce_{secrets.token_hex(12)}"
     execute_allowed = args.execute and args.confirm_cost_risk
@@ -506,7 +520,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pod-name", default=DEFAULT_POD_NAME)
     parser.add_argument("--image-tag", default=DEFAULT_IMAGE_TAG)
     parser.add_argument("--container-disk-gb", type=int, default=DEFAULT_CONTAINER_DISK_GB)
-    parser.add_argument("--max-wait-seconds", type=float, default=300)
+    parser.add_argument("--max-wait-seconds", type=float, default=600)
     parser.add_argument("--poll-interval-seconds", type=float, default=10)
     parser.add_argument("--timeout-seconds", type=float, default=20)
     return parser.parse_args()
