@@ -87,6 +87,19 @@ def checkpoint_status() -> list[dict]:
     return results
 
 
+def checkpoint_result(item: dict, *, download_attempted: bool, download_status: str) -> dict:
+    return {
+        "name": item["name"],
+        "repo_id": HF_REPO_ID,
+        "repo_filename": item["repo_filename"],
+        "source_url": item["source_url"],
+        "source_method": SOURCE_METHOD,
+        "local": file_facts(item["local_path"]),
+        "download_attempted": download_attempted,
+        "download_status": download_status,
+    }
+
+
 def build_log(args: argparse.Namespace, results: list[dict], status: str, error: str = "") -> dict:
     execute_allowed = args.execute and args.confirm_download
     return {
@@ -111,12 +124,7 @@ def build_log(args: argparse.Namespace, results: list[dict], status: str, error:
 def download_checkpoint(hf_hub_download, item: dict, overwrite: bool) -> dict:
     destination = item["local_path"]
     if destination.exists() and not overwrite:
-        return {
-            **item,
-            "local": file_facts(destination),
-            "download_attempted": False,
-            "download_status": "already_exists_skipped",
-        }
+        return checkpoint_result(item, download_attempted=False, download_status="already_exists_skipped")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     downloaded_path = Path(
@@ -129,12 +137,7 @@ def download_checkpoint(hf_hub_download, item: dict, overwrite: bool) -> dict:
     if destination.exists() and overwrite:
         destination.unlink()
     shutil.copy2(downloaded_path, destination)
-    return {
-        **item,
-        "local": file_facts(destination),
-        "download_attempted": True,
-        "download_status": "downloaded",
-    }
+    return checkpoint_result(item, download_attempted=True, download_status="downloaded")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -147,10 +150,22 @@ def run(args: argparse.Namespace) -> int:
             size = result["local"]["size_bytes"]
             print(f"[{TEST_ID}] LOCAL exists={str(exists).lower()} size={size} path={result['local']['path']}")
 
+        initial_all_exist = all(item["local"]["exists"] and item["local"]["is_file"] for item in results)
         if not execute_allowed:
-            status = "dry_run_ready"
+            status = "succeeded" if initial_all_exist else "dry_run_ready"
             write_json(LOG_PATH, build_log(args, results, status))
             print(f"[{TEST_ID}] DONE status={status} log={LOG_PATH}")
+            return 0
+
+        if initial_all_exist and not args.overwrite:
+            updated_results = [
+                checkpoint_result(item, download_attempted=False, download_status="already_exists_skipped")
+                for item in CHECKPOINTS
+            ]
+            write_json(LOG_PATH, build_log(args, updated_results, "succeeded"))
+            for updated in updated_results:
+                print(f"[{TEST_ID}] {updated['download_status']} size={updated['local']['size_bytes']} path={updated['local']['path']}")
+            print(f"[{TEST_ID}] DONE status=succeeded log={LOG_PATH}")
             return 0
 
         hf_hub_download = import_hf_hub_download()
