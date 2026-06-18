@@ -62,6 +62,9 @@ def env_presence() -> dict:
         "R2_INPUT_AUDIO_KEY",
         "R2_OUTPUT_VIDEO_KEY",
         "AYL_REQUIRE_ONNXRUNTIME_CUDA",
+        "LATENTSYNC_INFERENCE_STEPS",
+        "LATENTSYNC_GUIDANCE_SCALE",
+        "LATENTSYNC_ENABLE_DEEPCACHE",
         *R2_ENV_KEYS,
     )
     return {key: bool(os.getenv(key, "")) for key in keys}
@@ -203,8 +206,24 @@ def smoke_r2_keys() -> dict:
     }
 
 
+def bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name, "")
+    if not value:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def inference_settings() -> dict:
+    return {
+        "inference_steps": os.getenv("LATENTSYNC_INFERENCE_STEPS", "20"),
+        "guidance_scale": os.getenv("LATENTSYNC_GUIDANCE_SCALE", "1.5"),
+        "enable_deepcache": bool_env("LATENTSYNC_ENABLE_DEEPCACHE", True),
+    }
+
+
 def smoke_inference_command() -> list[str]:
-    return [
+    settings = inference_settings()
+    command = [
         sys.executable,
         "-m",
         "scripts.inference",
@@ -213,17 +232,23 @@ def smoke_inference_command() -> list[str]:
         "--inference_ckpt_path",
         "checkpoints/latentsync_unet.pt",
         "--inference_steps",
-        "20",
+        str(settings["inference_steps"]),
         "--guidance_scale",
-        "1.5",
-        "--enable_deepcache",
+        str(settings["guidance_scale"]),
+    ]
+    if settings["enable_deepcache"]:
+        command.append("--enable_deepcache")
+    command.extend(
+        [
         "--video_path",
         str(SMOKE_PATHS["video"]),
         "--audio_path",
         str(SMOKE_PATHS["audio"]),
         "--video_out_path",
         str(SMOKE_PATHS["output"]),
-    ]
+        ]
+    )
+    return command
 
 
 def patch_inference_for_local_vae() -> dict:
@@ -253,6 +278,7 @@ def run_smoke_report(mode: str) -> dict:
             "probe_scope": "latentsync_functional_smoke_run",
             "r2_input_keys": r2_keys,
             "container_paths": paths,
+            "inference_settings": inference_settings(),
             "inference_command": command,
             "latentsync_root": str(LATENTSYNC_ROOT),
         }
