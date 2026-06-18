@@ -14,13 +14,18 @@ DEFAULT_PROGRESS_KEY = f"{TEST_PREFIX}/progress/container_started.json"
 DEFAULT_FINAL_KEY = f"{TEST_PREFIX}/output/final_report.json"
 DEFAULT_SMOKE_UNET_KEY = "checkpoints/latentsync/latentsync_unet.pt"
 DEFAULT_SMOKE_WHISPER_KEY = "checkpoints/latentsync/whisper/tiny.pt"
+DEFAULT_SMOKE_VAE_CONFIG_KEY = "checkpoints/latentsync/vae/sd-vae-ft-mse/config.json"
+DEFAULT_SMOKE_VAE_SAFETENSORS_KEY = "checkpoints/latentsync/vae/sd-vae-ft-mse/diffusion_pytorch_model.safetensors"
 DEFAULT_SMOKE_VIDEO_KEY = "tests/runpod_latentsync_smoke_run_0001/input/video.mp4"
 DEFAULT_SMOKE_AUDIO_KEY = "tests/runpod_latentsync_smoke_run_0001/input/audio.wav"
 DEFAULT_SMOKE_OUTPUT_KEY = "tests/runpod_latentsync_smoke_run_0001/output/video_out.mp4"
 LATENTSYNC_ROOT = Path("/opt/LatentSync")
+LOCAL_VAE_ROOT = LATENTSYNC_ROOT / "checkpoints" / "vae" / "sd-vae-ft-mse"
 SMOKE_PATHS = {
     "unet": LATENTSYNC_ROOT / "checkpoints" / "latentsync_unet.pt",
     "whisper": LATENTSYNC_ROOT / "checkpoints" / "whisper" / "tiny.pt",
+    "vae_config": LOCAL_VAE_ROOT / "config.json",
+    "vae_safetensors": LOCAL_VAE_ROOT / "diffusion_pytorch_model.safetensors",
     "video": Path("/workspace/input/video.mp4"),
     "audio": Path("/workspace/input/audio.wav"),
     "output": Path("/workspace/output/video_out.mp4"),
@@ -51,6 +56,8 @@ def env_presence() -> dict:
         "R2_FINAL_REPORT_KEY",
         "R2_CHECKPOINT_UNET_KEY",
         "R2_CHECKPOINT_WHISPER_KEY",
+        "R2_VAE_CONFIG_KEY",
+        "R2_VAE_SAFETENSORS_KEY",
         "R2_INPUT_VIDEO_KEY",
         "R2_INPUT_AUDIO_KEY",
         "R2_OUTPUT_VIDEO_KEY",
@@ -164,6 +171,8 @@ def smoke_r2_keys() -> dict:
     return {
         "checkpoint_unet": os.getenv("R2_CHECKPOINT_UNET_KEY", DEFAULT_SMOKE_UNET_KEY),
         "checkpoint_whisper": os.getenv("R2_CHECKPOINT_WHISPER_KEY", DEFAULT_SMOKE_WHISPER_KEY),
+        "vae_config": os.getenv("R2_VAE_CONFIG_KEY", DEFAULT_SMOKE_VAE_CONFIG_KEY),
+        "vae_safetensors": os.getenv("R2_VAE_SAFETENSORS_KEY", DEFAULT_SMOKE_VAE_SAFETENSORS_KEY),
         "input_video": os.getenv("R2_INPUT_VIDEO_KEY", DEFAULT_SMOKE_VIDEO_KEY),
         "input_audio": os.getenv("R2_INPUT_AUDIO_KEY", DEFAULT_SMOKE_AUDIO_KEY),
         "output_video": os.getenv("R2_OUTPUT_VIDEO_KEY", DEFAULT_SMOKE_OUTPUT_KEY),
@@ -193,6 +202,22 @@ def smoke_inference_command() -> list[str]:
     ]
 
 
+def patch_inference_for_local_vae() -> dict:
+    inference_path = LATENTSYNC_ROOT / "scripts" / "inference.py"
+    source = inference_path.read_text(encoding="utf-8")
+    target = "stabilityai/sd-vae-ft-mse"
+    replacement = str(LOCAL_VAE_ROOT)
+    occurrences = source.count(target)
+    if occurrences:
+        inference_path.write_text(source.replace(target, replacement), encoding="utf-8")
+    return {
+        "inference_path": str(inference_path),
+        "target": target,
+        "replacement": str(LOCAL_VAE_ROOT),
+        "occurrences_replaced": occurrences,
+    }
+
+
 def run_smoke_report(mode: str) -> dict:
     report = base_report(mode)
     r2_keys = smoke_r2_keys()
@@ -217,6 +242,14 @@ def run_smoke_report(mode: str) -> dict:
     }
     write_progress(mode, "checkpoint_download_done", {"checkpoint_files": checkpoint_facts})
 
+    download_r2_file(r2_keys["vae_config"], SMOKE_PATHS["vae_config"])
+    download_r2_file(r2_keys["vae_safetensors"], SMOKE_PATHS["vae_safetensors"])
+    vae_facts = {
+        "config": file_facts(SMOKE_PATHS["vae_config"]),
+        "safetensors": file_facts(SMOKE_PATHS["vae_safetensors"]),
+    }
+    write_progress(mode, "vae_download_done", {"vae_files": vae_facts})
+
     download_r2_file(r2_keys["input_video"], SMOKE_PATHS["video"])
     download_r2_file(r2_keys["input_audio"], SMOKE_PATHS["audio"])
     input_facts = {
@@ -224,6 +257,12 @@ def run_smoke_report(mode: str) -> dict:
         "audio": file_facts(SMOKE_PATHS["audio"]),
     }
     write_progress(mode, "input_download_done", {"input_files": input_facts})
+
+    os.environ["HF_HOME"] = os.getenv("HF_HOME", "/opt/hf-cache")
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    vae_patch = patch_inference_for_local_vae()
+    write_progress(mode, "vae_patch_done", {"vae_patch": vae_patch})
 
     SMOKE_PATHS["output"].parent.mkdir(parents=True, exist_ok=True)
     write_progress(mode, "inference_started", {"inference_command": command})
@@ -253,6 +292,8 @@ def run_smoke_report(mode: str) -> dict:
             {
                 "runtime_probe_status": "inference_failed",
                 "checkpoint_files": checkpoint_facts,
+                "vae_files": vae_facts,
+                "vae_patch": vae_patch,
                 "input_files": input_facts,
                 "inference_result": inference_result,
                 "output_upload_status": "not_attempted",
@@ -265,6 +306,8 @@ def run_smoke_report(mode: str) -> dict:
             {
                 "runtime_probe_status": "output_missing",
                 "checkpoint_files": checkpoint_facts,
+                "vae_files": vae_facts,
+                "vae_patch": vae_patch,
                 "input_files": input_facts,
                 "inference_result": inference_result,
                 "output_upload_status": "not_attempted",
@@ -286,6 +329,8 @@ def run_smoke_report(mode: str) -> dict:
         {
             "runtime_probe_status": "ok",
             "checkpoint_files": checkpoint_facts,
+            "vae_files": vae_facts,
+            "vae_patch": vae_patch,
             "input_files": input_facts,
             "inference_result": inference_result,
             "output_file": output_facts,

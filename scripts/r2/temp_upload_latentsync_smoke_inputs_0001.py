@@ -25,6 +25,8 @@ REQUIRED_ENV_VARS = (
 UPLOAD_TARGETS = (
     ("checkpoint_unet", "checkpoint_unet_local", "checkpoints/latentsync/latentsync_unet.pt"),
     ("checkpoint_whisper", "checkpoint_whisper_local", "checkpoints/latentsync/whisper/tiny.pt"),
+    ("vae_config", "vae_config_local", "checkpoints/latentsync/vae/sd-vae-ft-mse/config.json"),
+    ("vae_safetensors", "vae_safetensors_local", "checkpoints/latentsync/vae/sd-vae-ft-mse/diffusion_pytorch_model.safetensors"),
     ("video", "video_local", "tests/runpod_latentsync_smoke_run_0001/input/video.mp4"),
     ("audio", "audio_local", "tests/runpod_latentsync_smoke_run_0001/input/audio.wav"),
 )
@@ -267,6 +269,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true", help="Allow replacing existing R2 objects.")
     parser.add_argument("--checkpoint-unet-local", default="", help="Local latentsync_unet.pt path.")
     parser.add_argument("--checkpoint-whisper-local", default="", help="Local whisper/tiny.pt path.")
+    parser.add_argument("--vae-config-local", default="", help="Local sd-vae-ft-mse config.json path.")
+    parser.add_argument("--vae-safetensors-local", default="", help="Local sd-vae-ft-mse diffusion_pytorch_model.safetensors path.")
     parser.add_argument("--video-local", default="", help="Local smoke input video.mp4 path.")
     parser.add_argument("--audio-local", default="", help="Local smoke input audio.wav path.")
     return parser.parse_args()

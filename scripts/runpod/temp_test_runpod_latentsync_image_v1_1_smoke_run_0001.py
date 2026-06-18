@@ -33,6 +33,8 @@ R2_FINAL_REPORT_KEY = "tests/runpod_latentsync_smoke_run_0001/output/final_repor
 R2_OUTPUT_VIDEO_KEY = "tests/runpod_latentsync_smoke_run_0001/output/video_out.mp4"
 R2_CHECKPOINT_UNET_KEY = "checkpoints/latentsync/latentsync_unet.pt"
 R2_CHECKPOINT_WHISPER_KEY = "checkpoints/latentsync/whisper/tiny.pt"
+R2_VAE_CONFIG_KEY = "checkpoints/latentsync/vae/sd-vae-ft-mse/config.json"
+R2_VAE_SAFETENSORS_KEY = "checkpoints/latentsync/vae/sd-vae-ft-mse/diffusion_pytorch_model.safetensors"
 R2_INPUT_VIDEO_KEY = "tests/runpod_latentsync_smoke_run_0001/input/video.mp4"
 R2_INPUT_AUDIO_KEY = "tests/runpod_latentsync_smoke_run_0001/input/audio.wav"
 
@@ -42,6 +44,7 @@ REQUIRED_FINAL_REPORT_FIELDS = (
     "r2_output_video_key",
     "output_upload_status",
     "checkpoint_files",
+    "vae_files",
     "input_files",
     "inference_result",
     "output_file",
@@ -187,6 +190,8 @@ def redacted_env() -> list[dict]:
         "R2_OUTPUT_VIDEO_KEY": R2_OUTPUT_VIDEO_KEY,
         "R2_CHECKPOINT_UNET_KEY": R2_CHECKPOINT_UNET_KEY,
         "R2_CHECKPOINT_WHISPER_KEY": R2_CHECKPOINT_WHISPER_KEY,
+        "R2_VAE_CONFIG_KEY": R2_VAE_CONFIG_KEY,
+        "R2_VAE_SAFETENSORS_KEY": R2_VAE_SAFETENSORS_KEY,
         "R2_INPUT_VIDEO_KEY": R2_INPUT_VIDEO_KEY,
         "R2_INPUT_AUDIO_KEY": R2_INPUT_AUDIO_KEY,
         "AYL_MARKER_NONCE": "<generated>",
@@ -211,6 +216,8 @@ def pod_env(config: dict, marker_nonce: str, args: argparse.Namespace) -> list[d
         {"key": "R2_OUTPUT_VIDEO_KEY", "value": R2_OUTPUT_VIDEO_KEY},
         {"key": "R2_CHECKPOINT_UNET_KEY", "value": R2_CHECKPOINT_UNET_KEY},
         {"key": "R2_CHECKPOINT_WHISPER_KEY", "value": R2_CHECKPOINT_WHISPER_KEY},
+        {"key": "R2_VAE_CONFIG_KEY", "value": R2_VAE_CONFIG_KEY},
+        {"key": "R2_VAE_SAFETENSORS_KEY", "value": R2_VAE_SAFETENSORS_KEY},
         {"key": "R2_INPUT_VIDEO_KEY", "value": R2_INPUT_VIDEO_KEY},
         {"key": "R2_INPUT_AUDIO_KEY", "value": R2_INPUT_AUDIO_KEY},
         {"key": "AYL_MARKER_NONCE", "value": marker_nonce},
@@ -257,12 +264,16 @@ def intended_payload(args: argparse.Namespace, marker_nonce: str) -> dict:
         "r2_input_keys": {
             "checkpoint_unet": R2_CHECKPOINT_UNET_KEY,
             "checkpoint_whisper": R2_CHECKPOINT_WHISPER_KEY,
+            "vae_config": R2_VAE_CONFIG_KEY,
+            "vae_safetensors": R2_VAE_SAFETENSORS_KEY,
             "input_video": R2_INPUT_VIDEO_KEY,
             "input_audio": R2_INPUT_AUDIO_KEY,
         },
         "container_paths": {
             "checkpoint_unet": "/opt/LatentSync/checkpoints/latentsync_unet.pt",
             "checkpoint_whisper": "/opt/LatentSync/checkpoints/whisper/tiny.pt",
+            "vae_config": "/opt/LatentSync/checkpoints/vae/sd-vae-ft-mse/config.json",
+            "vae_safetensors": "/opt/LatentSync/checkpoints/vae/sd-vae-ft-mse/diffusion_pytorch_model.safetensors",
             "input_video": "/workspace/input/video.mp4",
             "input_audio": "/workspace/input/audio.wav",
             "output_video": "/workspace/output/video_out.mp4",
