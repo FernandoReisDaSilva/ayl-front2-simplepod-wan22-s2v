@@ -41,7 +41,7 @@ RUN git clone --depth 1 "$LATENTSYNC_REPO" "$LATENTSYNC_PATH" \
 WORKDIR /opt/LatentSync
 
 RUN python -m pip install -r requirements.txt \
-    && python -m pip install boto3
+    && python -m pip install boto3 hf_transfer
 
 RUN mkdir -p /opt/ayl
 COPY docker/latentsync-runpod-v1/entrypoint.sh /opt/ayl/entrypoint.sh
