@@ -7,8 +7,6 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-import boto3
-
 
 TEST_PREFIX = "tests/runpod_latentsync_image_v1_1"
 DEFAULT_PROGRESS_KEY = f"{TEST_PREFIX}/progress/container_started.json"
@@ -49,6 +47,8 @@ def require_r2_env() -> None:
 
 
 def r2_client():
+    import boto3
+
     require_r2_env()
     return boto3.client(
         "s3",
@@ -82,14 +82,17 @@ def base_report(mode: str) -> dict:
     }
 
 
-def write_progress(mode: str) -> None:
+def write_progress(mode: str, status: str, extra: dict | None = None) -> None:
     progress_key = os.getenv("R2_PROGRESS_KEY", DEFAULT_PROGRESS_KEY)
+    payload = {
+        **base_report(mode),
+        "status": status,
+    }
+    if extra:
+        payload.update(extra)
     upload_json(
         progress_key,
-        {
-            **base_report(mode),
-            "status": "container_started",
-        },
+        payload,
     )
 
 
@@ -129,12 +132,41 @@ def build_report(mode: str) -> dict:
             }
         )
     elif mode == "latentsync_probe":
+        write_progress(mode, "torch_check_started")
+        torch_result = torch_probe()
+        write_progress(
+            mode,
+            "torch_check_done",
+            {
+                "torch_import_status": torch_result["torch_import_status"],
+                "torch_version": torch_result["torch_version"],
+                "cuda_available": torch_result["cuda_available"],
+                "gpu_name": torch_result["gpu_name"],
+            },
+        )
+        ffmpeg_exists = shutil.which("ffmpeg") is not None
+        write_progress(mode, "ffmpeg_check_done", {"ffmpeg_exists": ffmpeg_exists})
+        path_candidates = latentsync_paths()
+        path_exists = any(path_candidates.values())
+        write_progress(
+            mode,
+            "latentsync_path_check_done",
+            {
+                "latentsync_path_candidates": path_candidates,
+                "latentsync_path_exists": path_exists,
+            },
+        )
         report.update(
             {
                 "probe_scope": "latentsync_runtime_import_check",
-                "torch": torch_probe(),
-                "ffmpeg_exists": shutil.which("ffmpeg") is not None,
-                "latentsync_path_candidates": latentsync_paths(),
+                "torch_import_status": torch_result["torch_import_status"],
+                "torch_version": torch_result["torch_version"],
+                "cuda_available": torch_result["cuda_available"],
+                "gpu_name": torch_result["gpu_name"],
+                "torch_error_truncated": torch_result["error_truncated"],
+                "ffmpeg_exists": ffmpeg_exists,
+                "latentsync_path_candidates": path_candidates,
+                "latentsync_path_exists": path_exists,
             }
         )
     else:
@@ -144,13 +176,14 @@ def build_report(mode: str) -> dict:
 
 def run(mode: str) -> int:
     print(f"[AYL_RUNTIME_PROBE] start mode={mode}", flush=True)
-    write_progress(mode)
+    write_progress(mode, "container_started")
     final_key = os.getenv("R2_FINAL_REPORT_KEY", DEFAULT_FINAL_KEY)
     report = build_report(mode)
     report["r2_progress_key"] = os.getenv("R2_PROGRESS_KEY", DEFAULT_PROGRESS_KEY)
     report["r2_final_report_key"] = final_key
     report["r2_upload_status"] = "ok"
     upload_json(final_key, report)
+    write_progress(mode, "final_report_written", {"r2_final_report_key": final_key})
     print(f"[AYL_RUNTIME_PROBE] done mode={mode} status=ok", flush=True)
     return 0
 
