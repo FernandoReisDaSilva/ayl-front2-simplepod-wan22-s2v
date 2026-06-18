@@ -24,7 +24,7 @@ DEFAULT_TEMPLATE_ID = "runpod-ubuntu-2404"
 DEFAULT_GPU_TYPE_ID = "NVIDIA GeForce RTX 3090"
 DEFAULT_CLOUD_TYPE = "COMMUNITY"
 DEFAULT_POD_NAME = "ayl-test-latentsync-image-v1-1-smoke-run-0001"
-DEFAULT_IMAGE_TAG = "ghcr.io/fernandoreisdasilva/ayl-latentsync-runpod:0.1.6"
+DEFAULT_IMAGE_TAG = "ghcr.io/fernandoreisdasilva/ayl-latentsync-runpod:0.1.7"
 DEFAULT_CONTAINER_DISK_GB = 30
 RUN_MODE = "latentsync_smoke_run"
 

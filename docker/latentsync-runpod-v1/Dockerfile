@@ -43,6 +43,19 @@ WORKDIR /opt/LatentSync
 RUN python -m pip install -r requirements.txt \
     && python -m pip install boto3 hf_transfer
 
+RUN python - <<'PY'
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="stabilityai/sd-vae-ft-mse",
+    repo_type="model",
+    allow_patterns=[
+        "config.json",
+        "diffusion_pytorch_model.safetensors",
+    ],
+)
+PY
+
 RUN mkdir -p /opt/ayl
 COPY docker/latentsync-runpod-v1/entrypoint.sh /opt/ayl/entrypoint.sh
 COPY docker/latentsync-runpod-v1/runtime_probe.py /opt/ayl/runtime_probe.py
@@ -80,6 +93,10 @@ for name in modules:
     importlib.import_module(name)
 print("torch", torch.__version__, "cuda", torch.version.cuda)
 PY
+
+ENV HF_HOME=/opt/hf-cache
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
 
 ENTRYPOINT ["/opt/ayl/entrypoint.sh"]
 CMD ["idle"]
