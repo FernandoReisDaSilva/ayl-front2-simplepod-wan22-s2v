@@ -32,6 +32,16 @@ UPLOAD_TARGETS = (
 )
 
 
+TARGET_GROUPS = {
+    "audio": {"audio"},
+    "video": {"video"},
+    "inputs": {"video", "audio"},
+    "vae": {"vae_config", "vae_safetensors"},
+    "checkpoints": {"checkpoint_unet", "checkpoint_whisper"},
+    "all": {name for name, _, _ in UPLOAD_TARGETS},
+}
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -133,10 +143,34 @@ def local_path_from_arg(value: str) -> Path:
     return Path(value).expanduser().resolve()
 
 
+def selected_scope(args: argparse.Namespace) -> str:
+    selected = [
+        name
+        for name, enabled in (
+            ("audio", args.only_audio),
+            ("video", args.only_video),
+            ("inputs", args.only_inputs),
+            ("vae", args.only_vae),
+            ("checkpoints", args.only_checkpoints),
+        )
+        if enabled
+    ]
+    if len(selected) > 1:
+        raise RuntimeError("Use only one partial upload selector at a time.")
+    return selected[0] if selected else "all"
+
+
+def selected_targets(args: argparse.Namespace) -> tuple[str, tuple[tuple[str, str, str], ...]]:
+    scope = selected_scope(args)
+    names = TARGET_GROUPS[scope]
+    return scope, tuple(target for target in UPLOAD_TARGETS if target[0] in names)
+
+
 def build_upload_plan(args: argparse.Namespace) -> tuple[list[dict], list[str]]:
     items: list[dict] = []
     problems: list[str] = []
-    for name, arg_name, r2_key in UPLOAD_TARGETS:
+    _, targets = selected_targets(args)
+    for name, arg_name, r2_key in targets:
         raw_value = getattr(args, arg_name)
         missing_arg = not bool(raw_value)
         path = local_path_from_arg(raw_value) if raw_value else None
@@ -179,6 +213,10 @@ def build_log(
     error: str = "",
 ) -> dict:
     execute_allowed = args.execute and args.confirm_upload
+    try:
+        scope, _ = selected_targets(args)
+    except RuntimeError:
+        scope = "invalid_multiple_selectors"
     return {
         "test_id": TEST_ID,
         "created_at": now_iso(),
@@ -189,6 +227,7 @@ def build_log(
         "confirm_upload": args.confirm_upload,
         "execute_allowed": execute_allowed,
         "overwrite": args.overwrite,
+        "upload_scope": scope,
         "dry_run": not execute_allowed,
         "r2_endpoint_host": endpoint_host_only(config.get("endpoint", "")) if config else "",
         "r2_bucket_present": bool(config.get("bucket")) if config else False,
@@ -205,8 +244,9 @@ def run(args: argparse.Namespace) -> int:
     problems: list[str] = []
     execute_allowed = args.execute and args.confirm_upload
     try:
+        scope, _ = selected_targets(args)
         items, problems = build_upload_plan(args)
-        print(f"[{TEST_ID}] START dry_run={str(not execute_allowed).lower()} targets={len(items)}")
+        print(f"[{TEST_ID}] START dry_run={str(not execute_allowed).lower()} scope={scope} targets={len(items)}")
         for item in items:
             present = "ok" if item["local_is_file"] else "missing"
             print(f"[{TEST_ID}] LOCAL {present} size={item['local_size_bytes']} key={item['r2_key']}")
@@ -267,6 +307,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--execute", action="store_true", help="Perform real R2 uploads.")
     parser.add_argument("--confirm-upload", action="store_true", help="Required with --execute for real uploads.")
     parser.add_argument("--overwrite", action="store_true", help="Allow replacing existing R2 objects.")
+    parser.add_argument("--only-audio", action="store_true", help="Upload only tests/runpod_latentsync_smoke_run_0001/input/audio.wav.")
+    parser.add_argument("--only-video", action="store_true", help="Upload only tests/runpod_latentsync_smoke_run_0001/input/video.mp4.")
+    parser.add_argument("--only-inputs", action="store_true", help="Upload only smoke input video and audio.")
+    parser.add_argument("--only-vae", action="store_true", help="Upload only sd-vae-ft-mse files.")
+    parser.add_argument("--only-checkpoints", action="store_true", help="Upload only LatentSync UNet and Whisper checkpoints.")
     parser.add_argument("--checkpoint-unet-local", default="", help="Local latentsync_unet.pt path.")
     parser.add_argument("--checkpoint-whisper-local", default="", help="Local whisper/tiny.pt path.")
     parser.add_argument("--vae-config-local", default="", help="Local sd-vae-ft-mse config.json path.")
