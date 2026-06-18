@@ -10,6 +10,7 @@ ENV LATENTSYNC_PATH=/opt/LatentSync
 ENV MAMBA_ROOT_PREFIX=/opt/micromamba
 ENV PATH=/opt/latentsync-venv/bin:$PATH
 ENV HF_HOME=/opt/hf-cache
+ENV LD_LIBRARY_PATH=/opt/latentsync-venv/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib:/opt/latentsync-venv/lib/python3.10/site-packages/nvidia/cudnn/lib:/opt/latentsync-venv/lib/python3.10/site-packages/nvidia/cublas/lib:/opt/latentsync-venv/lib/python3.10/site-packages/nvidia/cuda_runtime/lib:${LD_LIBRARY_PATH}
 ENV PIP_NO_CACHE_DIR=1
 ENV PYTHONUNBUFFERED=1
 ENV DOWNLOAD_CHECKPOINTS=${DOWNLOAD_CHECKPOINTS}
@@ -41,7 +42,7 @@ RUN git clone --depth 1 "$LATENTSYNC_REPO" "$LATENTSYNC_PATH" \
 WORKDIR /opt/LatentSync
 
 RUN python -m pip install -r requirements.txt \
-    && python -m pip install boto3 hf_transfer
+    && python -m pip install boto3 hf_transfer nvidia-cuda-nvrtc-cu12==12.1.105
 
 RUN mkdir -p /opt/ayl
 COPY docker/latentsync-runpod-v1/entrypoint.sh /opt/ayl/entrypoint.sh
@@ -60,6 +61,7 @@ RUN if [ "$DOWNLOAD_CHECKPOINTS" = "1" ]; then \
 RUN python - <<'PY'
 import importlib
 import torch
+import onnxruntime as ort
 
 modules = [
     "torch",
@@ -79,6 +81,7 @@ modules = [
 for name in modules:
     importlib.import_module(name)
 print("torch", torch.__version__, "cuda", torch.version.cuda)
+print("onnxruntime", ort.__version__, "providers", ort.get_available_providers())
 PY
 
 ENV HF_HOME=/opt/hf-cache

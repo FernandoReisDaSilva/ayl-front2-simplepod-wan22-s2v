@@ -6,7 +6,7 @@ on:
       image_tag:
         description: "Target image tag."
         required: true
-        default: "ghcr.io/fernandoreisdasilva/ayl-latentsync-runpod:0.1.7"
+        default: "ghcr.io/fernandoreisdasilva/ayl-latentsync-runpod:0.1.8"
         type: string
       download_checkpoints:
         description: "Download and embed LatentSync checkpoints during build."

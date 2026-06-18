@@ -61,6 +61,7 @@ def env_presence() -> dict:
         "R2_INPUT_VIDEO_KEY",
         "R2_INPUT_AUDIO_KEY",
         "R2_OUTPUT_VIDEO_KEY",
+        "AYL_REQUIRE_ONNXRUNTIME_CUDA",
         *R2_ENV_KEYS,
     )
     return {key: bool(os.getenv(key, "")) for key in keys}
@@ -160,6 +161,29 @@ def torch_probe() -> dict:
     except Exception as exc:
         result["torch_import_status"] = "failed"
         result["error_truncated"] = str(exc)[:1000]
+    return result
+
+
+def onnxruntime_probe() -> dict:
+    result = {
+        "onnxruntime_import_status": "not_attempted",
+        "onnxruntime_version": "",
+        "onnxruntime_available_providers": [],
+        "onnxruntime_cuda_available": False,
+        "onnxruntime_cuda_required": os.getenv("AYL_REQUIRE_ONNXRUNTIME_CUDA", "") == "1",
+        "onnxruntime_error_truncated": "",
+    }
+    try:
+        import onnxruntime as ort
+
+        providers = list(ort.get_available_providers())
+        result["onnxruntime_import_status"] = "ok"
+        result["onnxruntime_version"] = getattr(ort, "__version__", "") or ""
+        result["onnxruntime_available_providers"] = providers
+        result["onnxruntime_cuda_available"] = "CUDAExecutionProvider" in providers
+    except Exception as exc:
+        result["onnxruntime_import_status"] = "failed"
+        result["onnxruntime_error_truncated"] = str(exc)[:1000]
     return result
 
 
@@ -264,6 +288,32 @@ def run_smoke_report(mode: str) -> dict:
     vae_patch = patch_inference_for_local_vae()
     write_progress(mode, "vae_patch_done", {"vae_patch": vae_patch})
 
+    onnxruntime_result = onnxruntime_probe()
+    write_progress(
+        mode,
+        "onnxruntime_check_done",
+        {
+            "onnxruntime_import_status": onnxruntime_result["onnxruntime_import_status"],
+            "onnxruntime_version": onnxruntime_result["onnxruntime_version"],
+            "onnxruntime_available_providers": onnxruntime_result["onnxruntime_available_providers"],
+            "onnxruntime_cuda_available": onnxruntime_result["onnxruntime_cuda_available"],
+            "onnxruntime_cuda_required": onnxruntime_result["onnxruntime_cuda_required"],
+        },
+    )
+    if onnxruntime_result["onnxruntime_cuda_required"] and not onnxruntime_result["onnxruntime_cuda_available"]:
+        report.update(
+            {
+                "runtime_probe_status": "onnxruntime_cuda_missing",
+                "checkpoint_files": checkpoint_facts,
+                "vae_files": vae_facts,
+                "vae_patch": vae_patch,
+                "onnxruntime_probe": onnxruntime_result,
+                "input_files": input_facts,
+                "output_upload_status": "not_attempted",
+            }
+        )
+        return report
+
     SMOKE_PATHS["output"].parent.mkdir(parents=True, exist_ok=True)
     write_progress(mode, "inference_started", {"inference_command": command})
     started_at = now_iso()
@@ -294,6 +344,7 @@ def run_smoke_report(mode: str) -> dict:
                 "checkpoint_files": checkpoint_facts,
                 "vae_files": vae_facts,
                 "vae_patch": vae_patch,
+                "onnxruntime_probe": onnxruntime_result,
                 "input_files": input_facts,
                 "inference_result": inference_result,
                 "output_upload_status": "not_attempted",
@@ -308,6 +359,7 @@ def run_smoke_report(mode: str) -> dict:
                 "checkpoint_files": checkpoint_facts,
                 "vae_files": vae_facts,
                 "vae_patch": vae_patch,
+                "onnxruntime_probe": onnxruntime_result,
                 "input_files": input_facts,
                 "inference_result": inference_result,
                 "output_upload_status": "not_attempted",
@@ -331,6 +383,7 @@ def run_smoke_report(mode: str) -> dict:
             "checkpoint_files": checkpoint_facts,
             "vae_files": vae_facts,
             "vae_patch": vae_patch,
+            "onnxruntime_probe": onnxruntime_result,
             "input_files": input_facts,
             "inference_result": inference_result,
             "output_file": output_facts,
@@ -365,6 +418,19 @@ def build_report(mode: str) -> dict:
         )
         ffmpeg_exists = shutil.which("ffmpeg") is not None
         write_progress(mode, "ffmpeg_check_done", {"ffmpeg_exists": ffmpeg_exists})
+        write_progress(mode, "onnxruntime_check_started")
+        onnxruntime_result = onnxruntime_probe()
+        write_progress(
+            mode,
+            "onnxruntime_check_done",
+            {
+                "onnxruntime_import_status": onnxruntime_result["onnxruntime_import_status"],
+                "onnxruntime_version": onnxruntime_result["onnxruntime_version"],
+                "onnxruntime_available_providers": onnxruntime_result["onnxruntime_available_providers"],
+                "onnxruntime_cuda_available": onnxruntime_result["onnxruntime_cuda_available"],
+                "onnxruntime_cuda_required": onnxruntime_result["onnxruntime_cuda_required"],
+            },
+        )
         path_candidates = latentsync_paths()
         path_exists = any(path_candidates.values())
         write_progress(
@@ -384,10 +450,18 @@ def build_report(mode: str) -> dict:
                 "gpu_name": torch_result["gpu_name"],
                 "torch_error_truncated": torch_result["error_truncated"],
                 "ffmpeg_exists": ffmpeg_exists,
+                "onnxruntime_import_status": onnxruntime_result["onnxruntime_import_status"],
+                "onnxruntime_version": onnxruntime_result["onnxruntime_version"],
+                "onnxruntime_available_providers": onnxruntime_result["onnxruntime_available_providers"],
+                "onnxruntime_cuda_available": onnxruntime_result["onnxruntime_cuda_available"],
+                "onnxruntime_cuda_required": onnxruntime_result["onnxruntime_cuda_required"],
+                "onnxruntime_error_truncated": onnxruntime_result["onnxruntime_error_truncated"],
                 "latentsync_path_candidates": path_candidates,
                 "latentsync_path_exists": path_exists,
             }
         )
+        if onnxruntime_result["onnxruntime_cuda_required"] and not onnxruntime_result["onnxruntime_cuda_available"]:
+            report["runtime_probe_status"] = "onnxruntime_cuda_missing"
     elif mode == "latentsync_smoke_run":
         report = run_smoke_report(mode)
     else:

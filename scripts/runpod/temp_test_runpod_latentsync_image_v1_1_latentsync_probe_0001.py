@@ -24,7 +24,7 @@ DEFAULT_TEMPLATE_ID = "runpod-ubuntu-2404"
 DEFAULT_GPU_TYPE_ID = "NVIDIA GeForce RTX 3090"
 DEFAULT_CLOUD_TYPE = "COMMUNITY"
 DEFAULT_POD_NAME = "ayl-test-latentsync-image-v1-1-latentsync-probe-0001"
-DEFAULT_IMAGE_TAG = "ghcr.io/fernandoreisdasilva/ayl-latentsync-runpod:0.1.4"
+DEFAULT_IMAGE_TAG = "ghcr.io/fernandoreisdasilva/ayl-latentsync-runpod:0.1.8"
 DEFAULT_CONTAINER_DISK_GB = 20
 R2_PROGRESS_KEY = "tests/runpod_latentsync_image_v1_1_latentsync_probe_0001/progress/container_started.json"
 R2_FINAL_REPORT_KEY = "tests/runpod_latentsync_image_v1_1_latentsync_probe_0001/output/final_report.json"
@@ -34,6 +34,10 @@ REQUIRED_FINAL_REPORT_FIELDS = (
     "cuda_available",
     "gpu_name",
     "ffmpeg_exists",
+    "onnxruntime_import_status",
+    "onnxruntime_available_providers",
+    "onnxruntime_cuda_available",
+    "onnxruntime_cuda_required",
     "latentsync_path_candidates",
     "latentsync_path_exists",
 )
@@ -188,6 +192,7 @@ def redacted_env() -> list[dict]:
     return [
         {"key": "AYL_RUN_MODE", "value": "latentsync_probe"},
         {"key": "AYL_IMAGE_TAG", "value": "<public_image_tag>"},
+        {"key": "AYL_REQUIRE_ONNXRUNTIME_CUDA", "value": "1"},
         {"key": "R2_ENDPOINT", "value": "<redacted>"},
         {"key": "R2_ACCESS_KEY_ID", "value": "<redacted>"},
         {"key": "R2_SECRET_ACCESS_KEY", "value": "<redacted>"},
@@ -203,6 +208,7 @@ def pod_env(config: dict, marker_nonce: str, args: argparse.Namespace) -> list[d
     return [
         {"key": "AYL_RUN_MODE", "value": "latentsync_probe"},
         {"key": "AYL_IMAGE_TAG", "value": args.image_tag},
+        {"key": "AYL_REQUIRE_ONNXRUNTIME_CUDA", "value": "1"},
         {"key": "R2_ENDPOINT", "value": config["endpoint"]},
         {"key": "R2_ACCESS_KEY_ID", "value": config["access_key_id"]},
         {"key": "R2_SECRET_ACCESS_KEY", "value": config["secret_access_key"]},
