@@ -55,6 +55,8 @@ Comportamento:
 - cria os diretórios locais necessários;
 - dry-run por padrão;
 - download real somente com `--execute --confirm-download`;
+- download real usa `hf download`, não `huggingface-cli download`;
+- antes do primeiro download real, valida se o comando `hf` existe e falha com pedido claro de instalação/upgrade se estiver ausente;
 - lista fonte, destino, existência local e tamanho atual;
 - valida tamanho mínimo esperado depois de execução real;
 - aplica copy/rename do wav2vec;
@@ -79,7 +81,13 @@ python3 scripts/models/temp_prepare_wan22_s2v_model_weights_v1.py --execute --co
 Dependência para execução real:
 
 ```bash
-python3 -m pip install huggingface_hub
+python3 -m pip install --upgrade huggingface_hub
+```
+
+Forma de download usada pelo script:
+
+```bash
+hf download <repo> <file> --local-dir <dir>
 ```
 
 ## Validações

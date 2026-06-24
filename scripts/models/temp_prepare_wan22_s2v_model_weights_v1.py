@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_ROOT = REPO_ROOT / "data" / "checkpoints" / "wan22_s2v" / "comfyui_models"
 RAW_ROOT = REPO_ROOT / "data" / "checkpoints" / "wan22_s2v" / "raw"
 LOG_PATH = REPO_ROOT / "logs" / "wan22_s2v_model_weights_prepare_v1_log.json"
-DEPENDENCY_NOTE = "Install Hugging Face CLI first if needed: python3 -m pip install huggingface_hub"
+DEPENDENCY_NOTE = "Install or upgrade Hugging Face Hub CLI: python3 -m pip install --upgrade huggingface_hub"
 
 WEIGHTS = (
     {
@@ -80,9 +80,16 @@ def ensure_directories() -> list[str]:
     return created_or_present
 
 
-def run_hf_download(repo_id: str, repo_file: str, local_dir: Path) -> None:
+def require_hf_command() -> str:
+    hf_command = shutil.which("hf")
+    if not hf_command:
+        raise RuntimeError(f"Command 'hf' not found. {DEPENDENCY_NOTE}")
+    return hf_command
+
+
+def run_hf_download(hf_command: str, repo_id: str, repo_file: str, local_dir: Path) -> None:
     command = [
-        "huggingface-cli",
+        hf_command,
         "download",
         repo_id,
         repo_file,
@@ -157,8 +164,8 @@ def validate_items(items: list[dict]) -> list[str]:
     return problems
 
 
-def prepare_weight(weight: dict) -> None:
-    run_hf_download(weight["repo_id"], weight["repo_file"], weight["download_local_dir"])
+def prepare_weight(hf_command: str, weight: dict) -> None:
+    run_hf_download(hf_command, weight["repo_id"], weight["repo_file"], weight["download_local_dir"])
     if weight["prepare_action"] == "download_then_copy_rename":
         source = weight["downloaded_path"]
         destination = weight["final_path"]
@@ -202,9 +209,11 @@ def run(args: argparse.Namespace) -> int:
             print(f"[{TEST_ID}] DONE status={status} log={LOG_PATH}")
             return 0
 
+        hf_command = require_hf_command()
+        print(f"[{TEST_ID}] HF_COMMAND {hf_command}")
         for weight in WEIGHTS:
             print(f"[{TEST_ID}] DOWNLOAD name={weight['name']} repo={weight['repo_id']} file={weight['repo_file']}")
-            prepare_weight(weight)
+            prepare_weight(hf_command, weight)
             item = build_item(weight)
             if not item["final_size_ok"]:
                 problems.append(
