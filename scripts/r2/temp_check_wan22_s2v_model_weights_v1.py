@@ -56,7 +56,7 @@ WEIGHT_INVENTORY = (
     {
         "id": "wav2vec_s2v_audio_encoder",
         "status": "required_confirmed_rename_only",
-        "comfy_models_relative_path": "text_encoders/wav2vec_xlsr_53_english_fp32.safetensors",
+        "comfy_models_relative_path": "audio_encoders/wav2vec_xlsr_53_english_fp32.safetensors",
         "workflow_node_id": 65,
         "workflow_node_type": "AudioEncoderLoader",
         "workflow_widget_value": "wav2vec_xlsr_53_english_fp32.safetensors",
@@ -67,49 +67,11 @@ WEIGHT_INVENTORY = (
             "huggingface-cli download Wan-AI/Wan2.2-S2V-14B "
             "wav2vec2-large-xlsr-53-english/model.safetensors "
             "--local-dir data/checkpoints/wan22_s2v/raw && "
-            "mkdir -p data/checkpoints/wan22_s2v/comfyui_models/text_encoders && "
+            "mkdir -p data/checkpoints/wan22_s2v/comfyui_models/audio_encoders && "
             "cp data/checkpoints/wan22_s2v/raw/wav2vec2-large-xlsr-53-english/model.safetensors "
-            "data/checkpoints/wan22_s2v/comfyui_models/text_encoders/wav2vec_xlsr_53_english_fp32.safetensors"
+            "data/checkpoints/wan22_s2v/comfyui_models/audio_encoders/wav2vec_xlsr_53_english_fp32.safetensors"
         ),
         "notes": "Workflow expects a single ComfyUI safetensors filename. The official Wan-AI repo already exposes model.safetensors; V1 needs a copy/rename, not format conversion.",
-    },
-    {
-        "id": "melband_roformer_vocal_separation",
-        "status": "remove_from_v1_clean_audio_optional_original_workflow",
-        "comfy_models_relative_path": "audio_encoders/MelBandRoFormer/MelBandRoformer_fp16.safetensors",
-        "workflow_node_id": 81,
-        "workflow_node_type": "MelBandRoFormerModelLoader",
-        "workflow_widget_value": "MelBandRoFormer\\MelBandRoformer_fp16.safetensors",
-        "source_repo": "",
-        "source_repo_path": "",
-        "expected_size_bytes": None,
-        "v1_workflow_action": "Bypass nodes 81, 82, and 98; connect VHS_LoadAudio node 94 directly to AudioEncoderEncode node 64 audio input.",
-        "notes": "Original workflow uses this for vocal separation before audio encoding. The Maé probe input is already isolated speech, so V1 should remove this dependency instead of adding another custom node/model.",
-    },
-    {
-        "id": "lightx2v_lora_rank64",
-        "status": "optional_or_workflow_aux",
-        "comfy_models_relative_path": "loras/WanVideo/Lightx2v/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16.safetensors",
-        "workflow_node_id": 60,
-        "workflow_node_type": "WanVideoLoraSelectMulti",
-        "workflow_widget_value": "WanVideo\\Lightx2v\\lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16_.safetensors",
-        "source_repo": "Kijai/WanVideo_comfy",
-        "source_repo_path": "Lightx2v/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16.safetensors",
-        "expected_size_bytes": None,
-        "notes": "Workflow widget appears to include a trailing underscore variant. The current graph has no outgoing links from the LoRA selection path in the inspected workflow; keep as auxiliary until confirmed.",
-    },
-    {
-        "id": "gimmvfi_interpolator",
-        "status": "remove_from_v1_interpolation_optional",
-        "comfy_models_relative_path": "upscale_models/gimmvfi_r_arb_lpips_fp32.safetensors",
-        "workflow_node_id": 95,
-        "workflow_node_type": "DownloadAndLoadGIMMVFIModel",
-        "workflow_widget_value": "gimmvfi_r_arb_lpips_fp32.safetensors",
-        "source_repo": "",
-        "source_repo_path": "",
-        "expected_size_bytes": None,
-        "v1_workflow_action": "Bypass nodes 95, 96, 102, and 30; use node 97 VHS_VideoCombine from the non-interpolated image stream.",
-        "notes": "This is interpolation, not core S2V. V1 should remove it to avoid extra weights and runtime downloads.",
     },
 )
 
