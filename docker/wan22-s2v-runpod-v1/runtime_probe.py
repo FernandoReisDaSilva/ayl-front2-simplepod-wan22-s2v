@@ -51,9 +51,11 @@ REQUIRED_NODE_CLASSES = (
 DECORATIVE_NODE_TYPES = {
     "MarkdownNote",
     "Note",
-    "PrimitiveNode",
     "AnythingEverywhere",
     "Reroute",
+}
+NON_DECORATIVE_NODE_TYPES_TO_PRESERVE = {
+    "PrimitiveNode",
 }
 
 
@@ -287,6 +289,7 @@ def filter_ui_workflow_for_api(workflow: dict) -> tuple[dict, dict]:
     }
     removed_nodes = []
     class_counts: dict[str, int] = {}
+    preserved_non_decorative = set()
     filtered_nodes = []
     for node in workflow.get("nodes", []):
         node_id = str(node.get("id"))
@@ -295,6 +298,8 @@ def filter_ui_workflow_for_api(workflow: dict) -> tuple[dict, dict]:
             removed_nodes.append({"id": node_id, "class_type": node_type, "title": node.get("title", "")})
             class_counts[node_type] = class_counts.get(node_type, 0) + 1
             continue
+        if node_type in NON_DECORATIVE_NODE_TYPES_TO_PRESERVE:
+            preserved_non_decorative.add(node_type)
         filtered_nodes.append(node)
 
     dependent_links = []
@@ -340,6 +345,7 @@ def filter_ui_workflow_for_api(workflow: dict) -> tuple[dict, dict]:
         "workflow_filter_status": status,
         "workflow_filter_removed_nodes": removed_nodes,
         "workflow_filter_removed_class_type_counts": class_counts,
+        "workflow_filter_preserved_non_decorative_node_classes": sorted(preserved_non_decorative),
         "workflow_filter_dependent_links": dependent_links,
         "workflow_filter_dependent_inputs": dependent_inputs,
     }

@@ -61,7 +61,6 @@ Antes de converter/enviar o workflow para `/prompt`, o worker agora remove nos d
 ```text
 MarkdownNote
 Note
-PrimitiveNode
 AnythingEverywhere
 Reroute
 ```
@@ -72,6 +71,7 @@ O `final_report.json` passa a incluir:
 workflow_filter_removed_nodes
 workflow_filter_removed_class_type_counts
 workflow_filter_status
+workflow_filter_preserved_non_decorative_node_classes
 ```
 
 Se algum link depender de um no removido, o worker falha antes do POST com:
@@ -82,6 +82,17 @@ output_upload_status=not_attempted
 ```
 
 Para `MarkdownNote`, a expectativa e remocao sem impacto. O payload debug salvo/subido e o payload final ja filtrado.
+
+## Ajuste Pos 0.1.2
+
+No probe `0.1.2`, o filtro detectou que `PrimitiveNode` id `71`, title `num_frames`, era funcional:
+
+```text
+link 79: PrimitiveNode 71 -> WanVideoEmptyEmbeds 37 input num_frames
+link 161: PrimitiveNode 71 -> WanVideoAddS2VEmbeds 101 input frame_window_size
+```
+
+Por isso, `PrimitiveNode` deixou de ser tratado como decorativo/removivel. Se ele voltar a gerar erro no `/prompt`, a proxima correcao deve converter `PrimitiveNode` para literal no payload API, nao remove-lo.
 
 ## Payload Debug
 
@@ -120,7 +131,7 @@ Esta alteracao:
 ## Proxima Tag Sugerida
 
 ```text
-0.1.2
+0.1.3
 ```
 
 ## Validacoes
