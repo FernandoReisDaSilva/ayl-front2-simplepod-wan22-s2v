@@ -963,6 +963,155 @@ def resolve_primitive_nodes(prompt: dict, workflow: dict) -> tuple[dict, dict]:
     }
 
 
+def object_input_spec(object_info: dict, class_name: str, input_name: str):
+    class_info = object_info.get(class_name, {})
+    inputs = class_info.get("input", {})
+    for section in ("required", "optional"):
+        values = inputs.get(section, {})
+        if isinstance(values, dict) and input_name in values:
+            return values[input_name]
+    return None
+
+
+def input_options(object_info: dict, class_name: str, input_name: str) -> list:
+    spec = object_input_spec(object_info, class_name, input_name)
+    if isinstance(spec, list) and spec and isinstance(spec[0], list):
+        return spec[0]
+    if isinstance(spec, tuple) and spec and isinstance(spec[0], list):
+        return spec[0]
+    return []
+
+
+def prompt_sanitize_change(changes: list[dict], node_id: str, class_name: str, input_name: str, old_value, new_value, reason: str) -> None:
+    if old_value == new_value:
+        return
+    changes.append(
+        {
+            "node_id": node_id,
+            "class_type": class_name,
+            "input_name": input_name,
+            "old_value": old_value,
+            "new_value": new_value,
+            "reason": reason,
+        }
+    )
+
+
+def accepted_or_default(options: list, preferred: str, fallback: str = "") -> str:
+    if preferred in options:
+        return preferred
+    if fallback and fallback in options:
+        return fallback
+    return str(options[0]) if options else preferred
+
+
+def sanitize_path_like_inputs(prompt: dict, changes: list[dict]) -> None:
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        for input_name, value in list(node.get("inputs", {}).items()):
+            if not isinstance(value, str) or "\\" not in value:
+                continue
+            lower_input = input_name.lower()
+            is_path_like = "model" in lower_input or "lora" in lower_input or value.endswith(".safetensors")
+            if not is_path_like:
+                continue
+            new_value = value.replace("\\", "/")
+            node["inputs"][input_name] = new_value
+            prompt_sanitize_change(changes, node_id, class_name, input_name, value, new_value, "normalize path separators")
+
+
+def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]:
+    changes: list[dict] = []
+    errors: list[str] = []
+
+    sanitize_path_like_inputs(prompt, changes)
+
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        inputs = node.setdefault("inputs", {})
+        if class_name == "WanVideoModelLoader":
+            old_value = inputs.get("model")
+            new_value = "WanVideo/S2V/Wan2_2-S2V-14B_fp8_e4m3fn_scaled_KJ.safetensors"
+            inputs["model"] = new_value
+            prompt_sanitize_change(changes, node_id, class_name, "model", old_value, new_value, "force V1 transformer model")
+        elif class_name == "WanVideoVAELoader":
+            old_value = inputs.get("model_name")
+            new_value = "wanvideo/Wan2_1_VAE_bf16.safetensors"
+            inputs["model_name"] = new_value
+            prompt_sanitize_change(changes, node_id, class_name, "model_name", old_value, new_value, "force V1 VAE model")
+        elif class_name == "WanVideoLoraSelectMulti":
+            for input_name, old_value in list(inputs.items()):
+                if not input_name.startswith("lora_"):
+                    continue
+                options = input_options(object_info, class_name, input_name)
+                if not options or old_value not in options:
+                    new_value = "none"
+                    inputs[input_name] = new_value
+                    prompt_sanitize_change(
+                        changes,
+                        node_id,
+                        class_name,
+                        input_name,
+                        old_value,
+                        new_value,
+                        "disable LoRA not included in V1 minimum",
+                    )
+        elif class_name == "ImageResizeKJv2":
+            old_value = inputs.get("device")
+            if old_value not in {"cpu", "gpu"}:
+                inputs["device"] = "gpu"
+                prompt_sanitize_change(changes, node_id, class_name, "device", old_value, "gpu", "force valid resize device")
+        elif class_name == "WanVideoSampler":
+            scheduler_options = input_options(object_info, class_name, "scheduler")
+            old_scheduler = inputs.get("scheduler")
+            new_scheduler = accepted_or_default(scheduler_options, "dpm++_sde")
+            inputs["scheduler"] = new_scheduler
+            prompt_sanitize_change(
+                changes,
+                node_id,
+                class_name,
+                "scheduler",
+                old_scheduler,
+                new_scheduler,
+                "force valid scheduler after UI widget alignment",
+            )
+            old_riflex = inputs.get("riflex_freq_index")
+            inputs["riflex_freq_index"] = 0
+            prompt_sanitize_change(
+                changes,
+                node_id,
+                class_name,
+                "riflex_freq_index",
+                old_riflex,
+                0,
+                "force integer riflex_freq_index after UI widget alignment",
+            )
+
+    remaining_suspect_values = []
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        for input_name, value in node.get("inputs", {}).items():
+            if isinstance(value, str) and ("<tr" in value.lower() or "<td" in value.lower() or "</" in value.lower()):
+                remaining_suspect_values.append(
+                    {
+                        "node_id": node_id,
+                        "class_type": class_name,
+                        "input_name": input_name,
+                        "value_truncated": value[:1000],
+                        "reason": "html_string_value",
+                    }
+                )
+
+    if remaining_suspect_values:
+        errors.append("HTML-like string values remain in prompt inputs after sanitize.")
+    return prompt, {
+        "prompt_sanitize_status": "error" if errors else "ok",
+        "prompt_sanitize_changes": changes,
+        "prompt_sanitize_errors": errors,
+        "prompt_sanitize_remaining_suspect_values": remaining_suspect_values,
+    }
+
+
 def truncate_text(value: str, limit: int = MAX_COMFYUI_ERROR_TEXT_CHARS) -> str:
     if len(value) <= limit:
         return value
@@ -1157,6 +1306,18 @@ def build_report(mode: str) -> dict:
                 }
             )
             write_progress(mode, "primitive_resolve_error", primitive_resolve)
+            return report
+        prompt, prompt_sanitize = sanitize_prompt_values(prompt, object_info)
+        report.update(prompt_sanitize)
+        if prompt_sanitize["prompt_sanitize_status"] == "error":
+            report.update(
+                {
+                    "runtime_probe_status": "prompt_sanitize_error",
+                    "output_upload_status": "not_attempted",
+                    "error_truncated": "; ".join(prompt_sanitize["prompt_sanitize_errors"])[:2000],
+                }
+            )
+            write_progress(mode, "prompt_sanitize_error", prompt_sanitize)
             return report
         report["prompt_node_count"] = len(prompt)
         report["workflow_control_node_ids"] = {"sampler": 27, "s2v_embeds": 101, "image": 73, "audio": 94, "video_combine": [30, 97]}

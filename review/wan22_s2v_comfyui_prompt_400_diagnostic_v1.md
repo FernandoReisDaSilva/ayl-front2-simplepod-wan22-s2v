@@ -328,6 +328,48 @@ Reroute
 
 `PrimitiveNode` continua sendo tratado apenas por `resolve_primitive_nodes()`, depois de `workflow_filter`, `melband_bypass` e `gimmvfi_bypass`, antes do payload debug e antes do `POST /prompt`.
 
+## Ajuste Pos 0.1.8
+
+No probe `0.1.8`, a resolucao de `PrimitiveNode` funcionou:
+
+```text
+workflow_filter_status=ok
+melband_bypass_status=ok
+gimmvfi_bypass_status=ok
+primitive_resolve_status=ok
+```
+
+O novo estagio e validacao de valores do prompt. O ComfyUI retornou `prompt_outputs_failed_validation` por valores desalinhados do workflow UI:
+
+- caminhos de modelo com `\` em vez de `/`;
+- LoRA nao incluida no V1 minimo;
+- `ImageResizeKJv2.device` contendo HTML em vez de `cpu`/`gpu`;
+- `WanVideoSampler.scheduler` e `riflex_freq_index` desalinhados.
+
+Foi adicionada a etapa:
+
+```text
+sanitize_prompt_values(prompt, object_info)
+```
+
+Ela roda depois de `resolve_primitive_nodes()` e antes do payload debug / `POST /prompt`.
+
+O `final_report.json` passa a incluir:
+
+```text
+prompt_sanitize_status
+prompt_sanitize_changes
+prompt_sanitize_errors
+prompt_sanitize_remaining_suspect_values
+```
+
+Se ainda houver string HTML em qualquer input apos a sanitizacao, o worker falha antes do POST com:
+
+```text
+runtime_probe_status=prompt_sanitize_error
+output_upload_status=not_attempted
+```
+
 ## Payload Debug
 
 O prompt enviado ao ComfyUI e salvo localmente antes do POST:
@@ -365,7 +407,7 @@ Esta alteracao:
 ## Proxima Tag Sugerida
 
 ```text
-0.1.8
+0.1.9
 ```
 
 ## Validacoes
