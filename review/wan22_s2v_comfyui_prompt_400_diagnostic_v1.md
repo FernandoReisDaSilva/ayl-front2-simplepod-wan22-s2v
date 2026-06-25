@@ -208,6 +208,59 @@ gimmvfi_bypass_preserved_video_path
 gimmvfi_bypass_selected_video_combine_node
 ```
 
+## Ajuste Pos 0.1.6
+
+No probe `0.1.6`, os bypasses anteriores funcionaram:
+
+```text
+workflow_filter_status=ok
+melband_bypass_status=ok
+gimmvfi_bypass_status=ok
+```
+
+O novo bloqueio foi:
+
+```text
+missing_node_type
+Node 'PrimitiveNode' not found
+Node ID '#71'
+class_type: PrimitiveNode
+```
+
+O `PrimitiveNode` id `71`, title `num_frames`, e funcional porque alimenta:
+
+```text
+node 37 WanVideoEmptyEmbeds input num_frames
+node 101 WanVideoAddS2VEmbeds input frame_window_size
+```
+
+Decisao: `PrimitiveNode` funcional nao deve ser removido como decorativo, mas tambem nao deve ir para `/prompt`. O worker agora resolve o valor literal, substitui os links nos inputs de destino e remove o `PrimitiveNode` do payload final.
+
+Para o caso `num_frames`, se nao houver valor seguro em `widgets_values`, o worker usa `WAN22_S2V_NUM_FRAMES` com fallback controlado `81`.
+
+Quando aplicado, o `final_report.json` registra:
+
+```text
+primitive_resolve_status=ok
+primitive_resolve_node_id=71
+primitive_resolve_title=num_frames
+primitive_resolve_targets
+primitive_resolve_resolved_nodes
+primitive_resolve_replaced_inputs
+primitive_resolve_removed_links
+```
+
+Se nao conseguir resolver com seguranca, o worker falha antes do POST com:
+
+```text
+runtime_probe_status=primitive_resolve_error
+output_upload_status=not_attempted
+primitive_resolve_status=error
+primitive_resolve_error
+primitive_resolve_detected_nodes
+primitive_resolve_detected_links
+```
+
 ## Payload Debug
 
 O prompt enviado ao ComfyUI e salvo localmente antes do POST:
@@ -245,7 +298,7 @@ Esta alteracao:
 ## Proxima Tag Sugerida
 
 ```text
-0.1.6
+0.1.7
 ```
 
 ## Validacoes

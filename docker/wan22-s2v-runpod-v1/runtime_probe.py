@@ -758,6 +758,169 @@ def apply_gimmvfi_bypass(prompt: dict) -> tuple[dict, dict]:
     }
 
 
+def workflow_node_lookup(workflow: dict) -> dict[str, dict]:
+    return {str(node.get("id")): node for node in workflow.get("nodes", [])}
+
+
+def primitive_literal_from_workflow_node(node: dict) -> tuple[object, str]:
+    widgets = node.get("widgets_values")
+    if isinstance(widgets, dict):
+        for key in ("value", "num_frames", "number", "int", "float"):
+            if key in widgets:
+                return widgets[key], f"widgets_values.{key}"
+        candidates = [(key, value) for key, value in widgets.items() if key != "videopreview"]
+        if len(candidates) == 1:
+            key, value = candidates[0]
+            return value, f"widgets_values.{key}"
+    if isinstance(widgets, list):
+        scalar_values = [
+            value
+            for value in widgets
+            if isinstance(value, str | int | float | bool) or value is None
+        ]
+        if len(scalar_values) == 1:
+            return scalar_values[0], "widgets_values[0]"
+
+    title = str(node.get("title", "")).strip().lower()
+    if title == "num_frames":
+        return env_int("WAN22_S2V_NUM_FRAMES", 81), "env:WAN22_S2V_NUM_FRAMES default 81"
+    return None, ""
+
+
+def detect_primitive_nodes(prompt: dict, workflow: dict) -> dict:
+    workflow_nodes = workflow_node_lookup(workflow)
+    links = prompt_links(prompt)
+    primitive_ids = [node_id for node_id, node in prompt.items() if node.get("class_type") == "PrimitiveNode"]
+    detected_nodes = []
+    for node_id in primitive_ids:
+        workflow_node = workflow_nodes.get(node_id, {})
+        outgoing_links = [link for link in links if link["source_node_id"] == node_id]
+        incoming_links = [link for link in links if link["target_node_id"] == node_id]
+        detected_nodes.append(
+            {
+                "id": node_id,
+                "class_type": class_type(prompt, node_id),
+                "title": workflow_node.get("title", ""),
+                "widgets_values": workflow_node.get("widgets_values"),
+                "prompt_inputs": prompt.get(node_id, {}).get("inputs", {}),
+                "outgoing_links": outgoing_links,
+                "incoming_links": incoming_links,
+            }
+        )
+    return {
+        "primitive_nodes": detected_nodes,
+        "primitive_links": [
+            link
+            for link in links
+            if link["source_node_id"] in set(primitive_ids) or link["target_node_id"] in set(primitive_ids)
+        ],
+    }
+
+
+def primitive_resolve_error(message: str, detected: dict) -> dict:
+    return {
+        "primitive_resolve_status": "error",
+        "primitive_resolve_error": message,
+        "primitive_resolve_detected_nodes": detected.get("primitive_nodes", []),
+        "primitive_resolve_detected_links": detected.get("primitive_links", []),
+        "primitive_resolve_resolved_nodes": [],
+        "primitive_resolve_replaced_inputs": [],
+        "primitive_resolve_removed_links": [],
+        "primitive_resolve_node_id": "",
+        "primitive_resolve_title": "",
+        "primitive_resolve_targets": [],
+    }
+
+
+def resolve_primitive_nodes(prompt: dict, workflow: dict) -> tuple[dict, dict]:
+    detected = detect_primitive_nodes(prompt, workflow)
+    primitive_nodes = detected["primitive_nodes"]
+    if not primitive_nodes:
+        return prompt, {
+            "primitive_resolve_status": "not_needed",
+            "primitive_resolve_error": "",
+            "primitive_resolve_detected_nodes": [],
+            "primitive_resolve_detected_links": [],
+            "primitive_resolve_resolved_nodes": [],
+            "primitive_resolve_replaced_inputs": [],
+            "primitive_resolve_removed_links": [],
+            "primitive_resolve_node_id": "",
+            "primitive_resolve_title": "",
+            "primitive_resolve_targets": [],
+        }
+
+    workflow_nodes = workflow_node_lookup(workflow)
+    patched_prompt = {node_id: node for node_id, node in prompt.items()}
+    resolved_nodes = []
+    replaced_inputs = []
+    removed_links = []
+    for primitive in primitive_nodes:
+        node_id = primitive["id"]
+        if primitive["incoming_links"]:
+            return prompt, primitive_resolve_error(f"PrimitiveNode {node_id} has incoming links.", detected)
+        value, source = primitive_literal_from_workflow_node(workflow_nodes.get(node_id, {}))
+        if primitive["outgoing_links"] and not source:
+            return prompt, primitive_resolve_error(f"Could not resolve literal value for PrimitiveNode {node_id}.", detected)
+        for link in primitive["outgoing_links"]:
+            target_id = link["target_node_id"]
+            input_name = link["target_input_name"]
+            if target_id not in patched_prompt:
+                return prompt, primitive_resolve_error(
+                    f"PrimitiveNode {node_id} target node {target_id} is missing.",
+                    detected,
+                )
+            old_value = patched_prompt[target_id].get("inputs", {}).get(input_name)
+            patched_prompt[target_id].setdefault("inputs", {})[input_name] = value
+            replaced_inputs.append(
+                {
+                    "source_node_id": node_id,
+                    "source_title": primitive.get("title", ""),
+                    "literal_value": value,
+                    "literal_source": source,
+                    "target_node_id": target_id,
+                    "target_class_type": class_type(prompt, target_id),
+                    "target_input_name": input_name,
+                    "replaced_value": old_value,
+                }
+            )
+            removed_links.append(link)
+        patched_prompt.pop(node_id, None)
+        resolved_nodes.append(
+            {
+                "id": node_id,
+                "class_type": "PrimitiveNode",
+                "title": primitive.get("title", ""),
+                "literal_value": value,
+                "literal_source": source,
+                "outgoing_link_count": len(primitive["outgoing_links"]),
+            }
+        )
+
+    primary = next((node for node in resolved_nodes if node["id"] == "71"), resolved_nodes[0])
+    primary_targets = [
+        {
+            "node_id": item["target_node_id"],
+            "class_type": item["target_class_type"],
+            "input_name": item["target_input_name"],
+            "literal_value": item["literal_value"],
+        }
+        for item in replaced_inputs
+        if item["source_node_id"] == primary["id"]
+    ]
+    return patched_prompt, {
+        "primitive_resolve_status": "ok",
+        "primitive_resolve_error": "",
+        "primitive_resolve_detected_nodes": detected.get("primitive_nodes", []),
+        "primitive_resolve_detected_links": detected.get("primitive_links", []),
+        "primitive_resolve_resolved_nodes": resolved_nodes,
+        "primitive_resolve_replaced_inputs": replaced_inputs,
+        "primitive_resolve_removed_links": removed_links,
+        "primitive_resolve_node_id": primary["id"],
+        "primitive_resolve_title": primary.get("title", ""),
+        "primitive_resolve_targets": primary_targets,
+    }
+
+
 def truncate_text(value: str, limit: int = MAX_COMFYUI_ERROR_TEXT_CHARS) -> str:
     if len(value) <= limit:
         return value
@@ -940,6 +1103,18 @@ def build_report(mode: str) -> dict:
                 }
             )
             write_progress(mode, "gimmvfi_bypass_error", gimmvfi_bypass)
+            return report
+        prompt, primitive_resolve = resolve_primitive_nodes(prompt, filtered_workflow)
+        report.update(primitive_resolve)
+        if primitive_resolve["primitive_resolve_status"] == "error":
+            report.update(
+                {
+                    "runtime_probe_status": "primitive_resolve_error",
+                    "output_upload_status": "not_attempted",
+                    "error_truncated": primitive_resolve["primitive_resolve_error"],
+                }
+            )
+            write_progress(mode, "primitive_resolve_error", primitive_resolve)
             return report
         report["prompt_node_count"] = len(prompt)
         report["workflow_control_node_ids"] = {"sampler": 27, "s2v_embeds": 101, "image": 73, "audio": 94, "video_combine": [30, 97]}
