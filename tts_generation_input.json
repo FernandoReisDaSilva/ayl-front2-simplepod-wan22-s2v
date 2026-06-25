@@ -1,0 +1,111 @@
+{
+  "video_id": "AYL_0001",
+  "voice_character": "Alex",
+  "taught_language": "EN",
+  "tts_engine": "google_cloud_tts",
+  "instructions": {
+    "input_field": "Use the 'ssml' field as the TTS input. Do NOT use 'text_reference' (that is plain text for captions only).",
+    "voice": "Single consistent male native English voice across all 12 files. Neutral US accent recommended (e.g. a Chirp3-HD or Studio male voice). Same voice for every file.",
+    "audio_format": "WAV / LINEAR16, 24000 Hz, mono",
+    "output_naming": "Save each file using its 'output_file' value exactly.",
+    "return_to_sender": "After generating, please measure and report the real duration (in seconds) of each WAV so the scene timings can be locked."
+  },
+  "segments": [
+    {
+      "output_file": "alex_en_speech_001.wav",
+      "scene_id": "scene_001",
+      "estimated_duration_seconds": 8,
+      "real_duration_seconds": null,
+      "ssml": "<speak>Quick question. <break time=\"400ms\"/> If I asked you this right now, in English, no subtitles — <emphasis level=\"moderate\">would you freeze</emphasis>, or <emphasis level=\"strong\">would you fire back</emphasis>?</speak>",
+      "text_reference": "Quick question. If I asked you this right now, in English, no subtitles — would you freeze, or would you fire back?"
+    },
+    {
+      "output_file": "alex_en_speech_003.wav",
+      "scene_id": "scene_003",
+      "estimated_duration_seconds": 31,
+      "real_duration_seconds": null,
+      "ssml": "<speak>Here's the test. I'm going to say three things a native speaker would actually say to you. Don't translate. Just try to answer before I do. Ready? <break time=\"500ms\"/>Number one: <prosody rate=\"95%\">\"Sorry, can you say that again?\"</prosody> <break time=\"1200ms\"/>Number two: <prosody rate=\"95%\">\"What do you think?\"</prosody> <break time=\"1200ms\"/>Number three: <prosody rate=\"95%\">\"I'll get back to you on that.\"</prosody></speak>",
+      "text_reference": "Here's the test. I'm going to say three things a native speaker would actually say to you. Don't translate. Just try to answer before I do. Ready? Number one: 'Sorry, can you say that again?' ... Number two: 'What do you think?' ... Number three: 'I'll get back to you on that.'"
+    },
+    {
+      "output_file": "alex_en_speech_005.wav",
+      "scene_id": "scene_005",
+      "estimated_duration_seconds": 52,
+      "real_duration_seconds": null,
+      "ssml": "<speak>I'll tell you when this hit me. <break time=\"400ms\"/>I was in a meeting, my own language, my own field, and someone asked me a question I knew the answer to cold. <break time=\"400ms\"/>I just sat there for two full seconds, the right words stuck somewhere between my brain and my mouth, before I finally got them out. <break time=\"400ms\"/>Everyone noticed the pause. <break time=\"600ms\"/>That's when I learned <emphasis level=\"moderate\">comprehension was never the real problem.</emphasis> The half-second gap between knowing and saying is where conversations actually die, in any language, including your own. <break time=\"500ms\"/>So here's response one, the one that would have saved me that day. When someone repeats something, a native doesn't say <prosody rate=\"90%\">\"Repeat, please.\"</prosody> They say: <emphasis level=\"strong\"><prosody rate=\"80%\">\"Sorry, come again?\"</prosody></emphasis> <break time=\"500ms\"/>Say that with me right now: <emphasis level=\"strong\"><prosody rate=\"75%\">\"Sorry, come again?\"</prosody></emphasis></speak>",
+      "text_reference": "I'll tell you when this hit me. I was in a meeting, my own language, my own field, and someone asked me a question I knew the answer to cold. I just sat there for two full seconds, the right words stuck somewhere between my brain and my mouth, before I finally got them out. Everyone noticed the pause. That's when I learned comprehension was never the real problem. The half-second gap between knowing and saying is where conversations actually die, in any language, including your own. So here's response one, the one that would have saved me that day. When someone repeats something, a native doesn't say 'Repeat, please.' They say: 'Sorry, come again?' Say that with me right now: 'Sorry, come again?'"
+    },
+    {
+      "output_file": "alex_en_speech_007.wav",
+      "scene_id": "scene_007",
+      "estimated_duration_seconds": 50,
+      "real_duration_seconds": null,
+      "ssml": "<speak>Let's build your real kit. Response one, you just got: <emphasis level=\"moderate\">\"Sorry, come again?\"</emphasis> — for when you didn't catch it. <break time=\"400ms\"/>Response two — someone asks your opinion on the spot: <emphasis level=\"strong\"><prosody rate=\"85%\">\"Honestly? I think...\"</prosody></emphasis> Just that opener buys you time and sounds completely natural. <break time=\"400ms\"/>Response three — you don't know yet: <emphasis level=\"strong\"><prosody rate=\"85%\">\"I'll get back to you on that.\"</prosody></emphasis> Not <prosody rate=\"90%\">\"I don't know.\"</prosody> That sounds final. This sounds active.</speak>",
+      "text_reference": "Let's build your real kit. Response one, you just got: 'Sorry, come again?' — for when you didn't catch it. Response two — someone asks your opinion on the spot: 'Honestly? I think...' Just that opener buys you time and sounds completely natural. Response three — you don't know yet: 'I'll get back to you on that.' Not 'I don't know.' That sounds final. This sounds active."
+    },
+    {
+      "output_file": "alex_en_speech_009.wav",
+      "scene_id": "scene_009",
+      "estimated_duration_seconds": 46,
+      "real_duration_seconds": null,
+      "ssml": "<speak>Response four — you need to push back, politely: <emphasis level=\"strong\"><prosody rate=\"85%\">\"I see your point, but...\"</prosody></emphasis> That's not rude. That's how natives disagree without sounding cold. <break time=\"400ms\"/>And response five, the one that saves you in almost any awkward pause: <emphasis level=\"strong\"><prosody rate=\"85%\">\"Let me think about that for a second.\"</prosody></emphasis></speak>",
+      "text_reference": "Response four — you need to push back, politely: 'I see your point, but...' That's not rude. That's how natives disagree without sounding cold. And response five, the one that saves you in almost any awkward pause: 'Let me think about that for a second.'"
+    },
+    {
+      "output_file": "alex_en_speech_011.wav",
+      "scene_id": "scene_011",
+      "estimated_duration_seconds": 45,
+      "real_duration_seconds": null,
+      "ssml": "<speak>Two more, because real conversations need more than five moves. <break time=\"400ms\"/>Response six — someone's explaining something fast and you're losing the thread: <emphasis level=\"strong\"><prosody rate=\"85%\">\"Wait, can you back up for a second?\"</prosody></emphasis> That buys you clarity without sounding lost. <break time=\"400ms\"/>And response seven — you actually agree, but want to add something: <emphasis level=\"strong\"><prosody rate=\"85%\">\"Exactly, and on top of that...\"</prosody></emphasis> That keeps you in the conversation instead of just nodding.</speak>",
+      "text_reference": "Two more, because real conversations need more than five moves. Response six — someone's explaining something fast and you're losing the thread: 'Wait, can you back up for a second?' That buys you clarity without sounding lost. And response seven — you actually agree, but want to add something: 'Exactly, and on top of that...' That keeps you in the conversation instead of just nodding."
+    },
+    {
+      "output_file": "alex_en_speech_013.wav",
+      "scene_id": "scene_013",
+      "estimated_duration_seconds": 55,
+      "real_duration_seconds": null,
+      "ssml": "<speak>Let's check you fast across all seven. I'll give you the situation, you give me the response — out loud, before I say it. <break time=\"500ms\"/>One: your friend didn't hear what you said. <break time=\"1000ms\"/>Two: your boss asks what you think about the new plan. <break time=\"1000ms\"/>Three: someone asks if you can finish a report by Friday and you're not sure. <break time=\"1000ms\"/>Four: a colleague is talking too fast and you're losing track. <break time=\"1000ms\"/>Five: someone makes a good point and you want to build on it.</speak>",
+      "text_reference": "Let's check you fast across all seven. I'll give you the situation, you give me the response — out loud, before I say it. One: your friend didn't hear what you said. ... Two: your boss asks what you think about the new plan. ... Three: someone asks if you can finish a report by Friday and you're not sure. ... Four: a colleague is talking too fast and you're losing track. ... Five: someone makes a good point and you want to build on it."
+    },
+    {
+      "output_file": "alex_en_speech_015.wav",
+      "scene_id": "scene_015",
+      "estimated_duration_seconds": 50,
+      "real_duration_seconds": null,
+      "ssml": "<speak>Now make it yours. Take response two — <emphasis level=\"moderate\">\"Honestly? I think...\"</emphasis> — and finish it with something true about your own life right now. <emphasis level=\"moderate\">Not my example. Yours.</emphasis> <break time=\"600ms\"/>Say the whole sentence out loud.</speak>",
+      "text_reference": "Now make it yours. Take response two — 'Honestly? I think...' — and finish it with something true about your own life right now. Not my example. Yours. Say the whole sentence out loud."
+    },
+    {
+      "output_file": "alex_en_speech_017.wav",
+      "scene_id": "scene_017",
+      "estimated_duration_seconds": 25,
+      "real_duration_seconds": null,
+      "ssml": "<speak>One more. Take response seven — <emphasis level=\"moderate\">\"Exactly, and on top of that...\"</emphasis> — and add your own real point to it. <break time=\"400ms\"/>Two personalized sentences, two responses that are actually yours now.</speak>",
+      "text_reference": "One more. Take response seven — 'Exactly, and on top of that...' — and add your own real point to it. Two personalized sentences, two responses that are actually yours now."
+    },
+    {
+      "output_file": "alex_en_speech_019.wav",
+      "scene_id": "scene_019",
+      "estimated_duration_seconds": 8,
+      "real_duration_seconds": null,
+      "ssml": "<speak>Last round. <break time=\"300ms\"/> <emphasis level=\"strong\">This one's timed.</emphasis></speak>",
+      "text_reference": "Last round. This one's timed."
+    },
+    {
+      "output_file": "alex_en_speech_021.wav",
+      "scene_id": "scene_021",
+      "estimated_duration_seconds": 13,
+      "real_duration_seconds": null,
+      "ssml": "<speak>If you fired back without translating — <emphasis level=\"strong\">that's activation.</emphasis> That's the whole point.</speak>",
+      "text_reference": "If you fired back without translating — that's activation. That's the whole point."
+    },
+    {
+      "output_file": "alex_en_speech_022.wav",
+      "scene_id": "scene_022",
+      "estimated_duration_seconds": 52,
+      "real_duration_seconds": null,
+      "ssml": "<speak>Here's your <emphasis level=\"moderate\">Activation Score.</emphasis> Out of the seven responses, how many did you say out loud, in real time, without freezing? <break time=\"400ms\"/>Give yourself a point for each one. <break time=\"400ms\"/>And here's the real test: which of them will you actually use this week? <break time=\"500ms\"/>Share your Activation Score in the comments and tell me which response you're using today — and stick around, the next drill goes even harder.</speak>",
+      "text_reference": "Here's your Activation Score. Out of the seven responses, how many did you say out loud, in real time, without freezing? Give yourself a point for each one. And here's the real test: which of them will you actually use this week? Share your Activation Score in the comments and tell me which response you're using today — and stick around, the next drill goes even harder."
+    }
+  ]
+}
