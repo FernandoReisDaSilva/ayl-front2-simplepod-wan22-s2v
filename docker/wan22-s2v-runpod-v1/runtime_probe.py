@@ -486,6 +486,7 @@ def melband_bypass_error(message: str, prompt: dict, detected: dict) -> dict:
         "melband_bypass_new_links": [],
         "melband_bypass_audio_source_node": "",
         "melband_bypass_audio_target_node": "",
+        "melband_bypass_audio_target_input_name": "",
     }
 
 
@@ -503,6 +504,7 @@ def apply_melband_bypass(prompt: dict) -> tuple[dict, dict]:
             "melband_bypass_new_links": [],
             "melband_bypass_audio_source_node": "",
             "melband_bypass_audio_target_node": "",
+            "melband_bypass_audio_target_input_name": "",
         }
 
     load_audio_ids = [item["id"] for item in detected["load_audio_nodes"]]
@@ -515,17 +517,9 @@ def apply_melband_bypass(prompt: dict) -> tuple[dict, dict]:
     audio_source_id = load_audio_ids[0]
     audio_target_id = audio_encoder_ids[0]
     audio_target = prompt.get(audio_target_id, {})
-    audio_input_names = [
-        input_name
-        for input_name, value in audio_target.get("inputs", {}).items()
-        if is_prompt_link(value) and str(value[0]) != audio_source_id
-    ]
-    if len(audio_input_names) != 1:
-        return prompt, melband_bypass_error(
-            "Could not identify exactly one linked audio input on AudioEncoderEncode.",
-            prompt,
-            detected,
-        )
+    audio_input_name = "audio"
+    if audio_input_name not in audio_target.get("inputs", {}):
+        return prompt, melband_bypass_error("AudioEncoderEncode input audio not found", prompt, detected)
 
     links = prompt_links(prompt)
     outgoing: dict[str, list[dict]] = {}
@@ -560,7 +554,6 @@ def apply_melband_bypass(prompt: dict) -> tuple[dict, dict]:
         for node_id, node in prompt.items()
         if node_id not in removable_ids
     }
-    audio_input_name = audio_input_names[0]
     old_audio_input = patched_prompt[audio_target_id]["inputs"].get(audio_input_name)
     patched_prompt[audio_target_id]["inputs"][audio_input_name] = [audio_source_id, 0]
     new_link = {
@@ -591,6 +584,7 @@ def apply_melband_bypass(prompt: dict) -> tuple[dict, dict]:
         "melband_bypass_new_links": [new_link],
         "melband_bypass_audio_source_node": audio_source_id,
         "melband_bypass_audio_target_node": audio_target_id,
+        "melband_bypass_audio_target_input_name": audio_input_name,
     }
 
 

@@ -135,6 +135,41 @@ melband_bypass_detected_nodes
 melband_bypass_detected_links
 ```
 
+## Ajuste Pos 0.1.4
+
+No probe `0.1.4`, o bypass detectou a topologia suficiente, mas falhou porque tentava identificar o input de audio por contagem generica de links.
+
+Topologia confirmada:
+
+```text
+94 VHS_LoadAudio
+64 AudioEncoderEncode
+81 MelBandRoFormerModelLoader
+82 MelBandRoFormerSampler
+98 NormalizeAudioLoudness
+82 output 0 -> 98 input audio
+98 output 0 -> 64 input audio
+```
+
+Correcao aplicada: o alvo do bypass agora e explicitamente:
+
+```text
+AudioEncoderEncode 64 input audio
+```
+
+Se esse input nao existir, o worker falha antes do POST com:
+
+```text
+runtime_probe_status=melband_bypass_error
+melband_bypass_error=AudioEncoderEncode input audio not found
+```
+
+Quando aplicado, o `final_report.json` tambem registra:
+
+```text
+melband_bypass_audio_target_input_name=audio
+```
+
 ## Payload Debug
 
 O prompt enviado ao ComfyUI e salvo localmente antes do POST:
@@ -172,7 +207,7 @@ Esta alteracao:
 ## Proxima Tag Sugerida
 
 ```text
-0.1.4
+0.1.5
 ```
 
 ## Validacoes
