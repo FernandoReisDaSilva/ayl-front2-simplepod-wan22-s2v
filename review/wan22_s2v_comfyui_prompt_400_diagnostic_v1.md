@@ -370,6 +370,59 @@ runtime_probe_status=prompt_sanitize_error
 output_upload_status=not_attempted
 ```
 
+## Ajuste Pos 0.1.9
+
+No probe `0.1.9`, o payload foi aceito pelo `/prompt`, a validacao passou e a execucao ComfyUI iniciou.
+
+Novo bloqueio:
+
+```text
+ValueError: Can't import SageAttention: No module named 'sageattention'
+ComfyUI-WanVideoWrapper/nodes_model_loading.py loadmodel
+```
+
+Decisao V1: antes de instalar `sageattention`, tentar desabilitar SageAttention pelo payload quando houver controle seguro.
+
+`sanitize_prompt_values(prompt, object_info)` agora procura inputs relacionados a:
+
+```text
+sage
+sage_attention
+use_sage
+use_sage_attention
+attention
+attention_mode
+attention_backend
+```
+
+Quando encontrar controle, tenta escolher valor seguro aceito pelo `object_info`, preferindo:
+
+```text
+false
+disabled
+sdpa
+pytorch
+torch
+flash_attn
+```
+
+O `final_report.json` passa a incluir:
+
+```text
+sageattention_policy
+sageattention_detected_inputs
+sageattention_sanitize_changes
+sageattention_remaining_enabled_values
+```
+
+Se nenhum input controlavel existir:
+
+```text
+sageattention_policy=no_payload_control_found
+```
+
+Nenhuma instalacao de `sageattention` foi adicionada nesta etapa.
+
 ## Payload Debug
 
 O prompt enviado ao ComfyUI e salvo localmente antes do POST:
@@ -407,7 +460,7 @@ Esta alteracao:
 ## Proxima Tag Sugerida
 
 ```text
-0.1.9
+0.1.10
 ```
 
 ## Validacoes

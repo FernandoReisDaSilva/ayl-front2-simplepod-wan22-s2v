@@ -1020,6 +1020,101 @@ def sanitize_path_like_inputs(prompt: dict, changes: list[dict]) -> None:
             prompt_sanitize_change(changes, node_id, class_name, input_name, value, new_value, "normalize path separators")
 
 
+def is_attention_control_input(input_name: str) -> bool:
+    lower_name = input_name.lower()
+    return any(
+        token in lower_name
+        for token in (
+            "sage",
+            "sage_attention",
+            "use_sage",
+            "use_sage_attention",
+            "attention",
+            "attention_mode",
+            "attention_backend",
+        )
+    )
+
+
+def safe_attention_value(current_value, options: list):
+    safe_string_preferences = ("disabled", "sdpa", "pytorch", "torch", "flash_attn", "none", "off")
+    if options:
+        for preferred in (False, "disabled", "sdpa", "pytorch", "torch", "flash_attn", "none", "off"):
+            if preferred in options:
+                return preferred
+        return None
+    if isinstance(current_value, bool):
+        return False
+    if isinstance(current_value, str):
+        return "sdpa"
+    return None
+
+
+def sanitize_sageattention_inputs(prompt: dict, object_info: dict, changes: list[dict]) -> dict:
+    detected_inputs = []
+    sage_changes = []
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        for input_name, old_value in list(node.get("inputs", {}).items()):
+            if not is_attention_control_input(input_name):
+                continue
+            options = input_options(object_info, class_name, input_name)
+            detected = {
+                "node_id": node_id,
+                "class_type": class_name,
+                "input_name": input_name,
+                "old_value": old_value,
+                "object_info_options": options,
+            }
+            detected_inputs.append(detected)
+            new_value = safe_attention_value(old_value, options)
+            if new_value is None:
+                continue
+            node["inputs"][input_name] = new_value
+            before = len(changes)
+            prompt_sanitize_change(
+                changes,
+                node_id,
+                class_name,
+                input_name,
+                old_value,
+                new_value,
+                "disable SageAttention / choose safe attention backend",
+            )
+            if len(changes) > before:
+                sage_changes.append(changes[-1])
+
+    remaining_enabled = []
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        for input_name, value in node.get("inputs", {}).items():
+            if not is_attention_control_input(input_name):
+                continue
+            value_text = str(value).lower()
+            if value is True or "sage" in value_text:
+                remaining_enabled.append(
+                    {
+                        "node_id": node_id,
+                        "class_type": class_name,
+                        "input_name": input_name,
+                        "value": value,
+                    }
+                )
+
+    if sage_changes:
+        policy = "payload_control_applied"
+    elif detected_inputs:
+        policy = "payload_control_detected_no_safe_option"
+    else:
+        policy = "no_payload_control_found"
+    return {
+        "sageattention_policy": policy,
+        "sageattention_detected_inputs": detected_inputs,
+        "sageattention_sanitize_changes": sage_changes,
+        "sageattention_remaining_enabled_values": remaining_enabled,
+    }
+
+
 def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]:
     changes: list[dict] = []
     errors: list[str] = []
@@ -1087,6 +1182,7 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
                 "force integer riflex_freq_index after UI widget alignment",
             )
 
+    sageattention_report = sanitize_sageattention_inputs(prompt, object_info, changes)
     remaining_suspect_values = []
     for node_id, node in prompt.items():
         class_name = str(node.get("class_type", ""))
@@ -1109,6 +1205,7 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
         "prompt_sanitize_changes": changes,
         "prompt_sanitize_errors": errors,
         "prompt_sanitize_remaining_suspect_values": remaining_suspect_values,
+        **sageattention_report,
     }
 
 
