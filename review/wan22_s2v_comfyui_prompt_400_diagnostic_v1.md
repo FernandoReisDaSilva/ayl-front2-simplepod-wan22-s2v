@@ -170,6 +170,44 @@ Quando aplicado, o `final_report.json` tambem registra:
 melband_bypass_audio_target_input_name=audio
 ```
 
+## Ajuste Pos 0.1.5
+
+No probe `0.1.5`, o bypass MelBand funcionou:
+
+```text
+workflow_filter_status=ok
+melband_bypass_status=ok
+```
+
+O proximo erro do ComfyUI foi:
+
+```text
+missing_node_type
+Node 'DownloadAndLoadGIMMVFIModel' not found
+Node ID '#95'
+class_type: DownloadAndLoadGIMMVFIModel
+```
+
+Decisao V1: GIMMVFI nao entra no conjunto minimo. Ele e interpolacao/pos-processamento, nao S2V principal.
+
+O worker agora tenta aplicar bypass GIMMVFI antes do POST:
+
+- remove `DownloadAndLoadGIMMVFIModel` e demais nos diretamente dependentes da interpolacao;
+- remove o `VHS_VideoCombine` ligado ao caminho interpolado;
+- preserva o caminho S2V direto;
+- prefere `VHS_VideoCombine` node `97` quando ele nao estiver no caminho interpolado;
+- se nao for seguro identificar o combine direto, falha antes do POST com `runtime_probe_status=gimmvfi_bypass_error`.
+
+Quando aplicado, o `final_report.json` registra:
+
+```text
+gimmvfi_bypass_status=ok
+gimmvfi_bypass_removed_nodes
+gimmvfi_bypass_removed_links
+gimmvfi_bypass_preserved_video_path
+gimmvfi_bypass_selected_video_combine_node
+```
+
 ## Payload Debug
 
 O prompt enviado ao ComfyUI e salvo localmente antes do POST:
@@ -207,7 +245,7 @@ Esta alteracao:
 ## Proxima Tag Sugerida
 
 ```text
-0.1.5
+0.1.6
 ```
 
 ## Validacoes

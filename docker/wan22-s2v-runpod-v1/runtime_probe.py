@@ -588,6 +588,176 @@ def apply_melband_bypass(prompt: dict) -> tuple[dict, dict]:
     }
 
 
+def is_gimmvfi_class(class_name: str) -> bool:
+    lower_name = class_name.lower()
+    return "gimmvfi" in lower_name or "vfi" in lower_name
+
+
+def detect_gimmvfi_nodes(prompt: dict) -> dict:
+    links = prompt_links(prompt)
+    gimmvfi_nodes = [
+        node_id
+        for node_id, node in prompt.items()
+        if is_gimmvfi_class(str(node.get("class_type", "")))
+    ]
+    video_combine_nodes = [
+        node_id for node_id, node in prompt.items() if node.get("class_type") == "VHS_VideoCombine"
+    ]
+    interpolation_nodes = [
+        node_id
+        for node_id, node in prompt.items()
+        if "interpol" in str(node.get("class_type", "")).lower()
+    ]
+    select_every_nth_nodes = [
+        node_id for node_id, node in prompt.items() if node.get("class_type") == "VHS_SelectEveryNthImage"
+    ]
+    related_ids = set(gimmvfi_nodes + interpolation_nodes + select_every_nth_nodes)
+    return {
+        "gimmvfi_nodes": [{"id": node_id, "class_type": class_type(prompt, node_id)} for node_id in gimmvfi_nodes],
+        "interpolation_nodes": [{"id": node_id, "class_type": class_type(prompt, node_id)} for node_id in interpolation_nodes],
+        "select_every_nth_nodes": [{"id": node_id, "class_type": class_type(prompt, node_id)} for node_id in select_every_nth_nodes],
+        "video_combine_nodes": [{"id": node_id, "class_type": class_type(prompt, node_id)} for node_id in video_combine_nodes],
+        "gimmvfi_related_links": [
+            link
+            for link in links
+            if link["source_node_id"] in related_ids or link["target_node_id"] in related_ids
+        ],
+    }
+
+
+def gimmvfi_video_combine_candidates(prompt: dict, interpolated_combine_ids: set[str]) -> list[dict]:
+    candidates = []
+    links = prompt_links(prompt)
+    for node_id, node in prompt.items():
+        if node.get("class_type") != "VHS_VideoCombine":
+            continue
+        input_links = [link for link in links if link["target_node_id"] == node_id]
+        candidates.append(
+            {
+                "id": node_id,
+                "class_type": class_type(prompt, node_id),
+                "is_interpolated_path": node_id in interpolated_combine_ids,
+                "is_preferred_direct_node_97": node_id == "97",
+                "input_links": input_links,
+            }
+        )
+    return candidates
+
+
+def gimmvfi_bypass_error(message: str, detected: dict, candidates: list[dict]) -> dict:
+    return {
+        "gimmvfi_bypass_status": "error",
+        "gimmvfi_bypass_error": message,
+        "gimmvfi_bypass_detected_nodes": detected,
+        "gimmvfi_bypass_detected_links": detected.get("gimmvfi_related_links", []),
+        "gimmvfi_bypass_video_combine_candidates": candidates,
+        "gimmvfi_bypass_removed_nodes": [],
+        "gimmvfi_bypass_removed_links": [],
+        "gimmvfi_bypass_preserved_video_path": {},
+        "gimmvfi_bypass_selected_video_combine_node": "",
+    }
+
+
+def apply_gimmvfi_bypass(prompt: dict) -> tuple[dict, dict]:
+    detected = detect_gimmvfi_nodes(prompt)
+    gimmvfi_ids = {item["id"] for item in detected["gimmvfi_nodes"]}
+    if not gimmvfi_ids:
+        return prompt, {
+            "gimmvfi_bypass_status": "not_needed",
+            "gimmvfi_bypass_error": "",
+            "gimmvfi_bypass_detected_nodes": detected,
+            "gimmvfi_bypass_detected_links": [],
+            "gimmvfi_bypass_video_combine_candidates": gimmvfi_video_combine_candidates(prompt, set()),
+            "gimmvfi_bypass_removed_nodes": [],
+            "gimmvfi_bypass_removed_links": [],
+            "gimmvfi_bypass_preserved_video_path": {},
+            "gimmvfi_bypass_selected_video_combine_node": "",
+        }
+
+    links = prompt_links(prompt)
+    outgoing: dict[str, list[dict]] = {}
+    for link in links:
+        outgoing.setdefault(link["source_node_id"], []).append(link)
+
+    removable_ids = set(gimmvfi_ids)
+    interpolated_combine_ids: set[str] = set()
+    queue = list(gimmvfi_ids)
+    while queue:
+        current = queue.pop(0)
+        for link in outgoing.get(current, []):
+            target_id = link["target_node_id"]
+            target_class = class_type(prompt, target_id)
+            target_lower = target_class.lower()
+            if target_class == "VHS_VideoCombine":
+                interpolated_combine_ids.add(target_id)
+                continue
+            if (
+                is_gimmvfi_class(target_class)
+                or target_class == "VHS_SelectEveryNthImage"
+                or "interpol" in target_lower
+            ):
+                if target_id not in removable_ids:
+                    removable_ids.add(target_id)
+                    queue.append(target_id)
+
+    candidates = gimmvfi_video_combine_candidates(prompt, interpolated_combine_ids)
+    direct_candidates = [item for item in candidates if not item["is_interpolated_path"]]
+    selected_candidate = next((item for item in direct_candidates if item["id"] == "97"), None)
+    if selected_candidate is None and len(direct_candidates) == 1:
+        selected_candidate = direct_candidates[0]
+    if selected_candidate is None:
+        return prompt, gimmvfi_bypass_error(
+            "Could not safely identify direct non-interpolated VHS_VideoCombine.",
+            detected,
+            candidates,
+        )
+
+    removable_ids.update(node_id for node_id in interpolated_combine_ids if node_id != selected_candidate["id"])
+    removed_nodes = [
+        {"id": node_id, "class_type": class_type(prompt, node_id)}
+        for node_id in sorted(removable_ids, key=lambda value: int(value) if value.isdigit() else value)
+    ]
+    removed_links = [
+        link
+        for link in links
+        if link["source_node_id"] in removable_ids or link["target_node_id"] in removable_ids
+    ]
+    patched_prompt = {
+        node_id: node
+        for node_id, node in prompt.items()
+        if node_id not in removable_ids
+    }
+    remaining_bad_links = [
+        link
+        for link in prompt_links(patched_prompt)
+        if link["source_node_id"] in removable_ids or link["target_node_id"] in removable_ids
+    ]
+    if remaining_bad_links:
+        return prompt, gimmvfi_bypass_error(
+            "Bypass left links connected to removed GIMMVFI nodes.",
+            {**detected, "remaining_bad_links": remaining_bad_links},
+            candidates,
+        )
+
+    selected_node_id = selected_candidate["id"]
+    preserved_video_path = {
+        "selected_video_combine": selected_candidate,
+        "selected_video_combine_inputs": patched_prompt.get(selected_node_id, {}).get("inputs", {}),
+        "logic": "preferred node 97 when it is not on the GIMMVFI interpolated path; otherwise the only non-interpolated VHS_VideoCombine",
+    }
+    return patched_prompt, {
+        "gimmvfi_bypass_status": "ok",
+        "gimmvfi_bypass_error": "",
+        "gimmvfi_bypass_detected_nodes": detected,
+        "gimmvfi_bypass_detected_links": detected.get("gimmvfi_related_links", []),
+        "gimmvfi_bypass_video_combine_candidates": candidates,
+        "gimmvfi_bypass_removed_nodes": removed_nodes,
+        "gimmvfi_bypass_removed_links": removed_links,
+        "gimmvfi_bypass_preserved_video_path": preserved_video_path,
+        "gimmvfi_bypass_selected_video_combine_node": selected_node_id,
+    }
+
+
 def truncate_text(value: str, limit: int = MAX_COMFYUI_ERROR_TEXT_CHARS) -> str:
     if len(value) <= limit:
         return value
@@ -758,6 +928,18 @@ def build_report(mode: str) -> dict:
                 }
             )
             write_progress(mode, "melband_bypass_error", melband_bypass)
+            return report
+        prompt, gimmvfi_bypass = apply_gimmvfi_bypass(prompt)
+        report.update(gimmvfi_bypass)
+        if gimmvfi_bypass["gimmvfi_bypass_status"] == "error":
+            report.update(
+                {
+                    "runtime_probe_status": "gimmvfi_bypass_error",
+                    "output_upload_status": "not_attempted",
+                    "error_truncated": gimmvfi_bypass["gimmvfi_bypass_error"],
+                }
+            )
+            write_progress(mode, "gimmvfi_bypass_error", gimmvfi_bypass)
             return report
         report["prompt_node_count"] = len(prompt)
         report["workflow_control_node_ids"] = {"sampler": 27, "s2v_embeds": 101, "image": 73, "audio": 94, "video_combine": [30, 97]}
