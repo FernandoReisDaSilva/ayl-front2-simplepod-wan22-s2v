@@ -16,6 +16,19 @@ mas o `final_report.json` so preservava o erro generico:
 
 Isso escondia a resposta real do ComfyUI, que normalmente contem o motivo da rejeicao do prompt.
 
+## Causa Encontrada
+
+No teste com imagem `0.1.1`, o ComfyUI retornou:
+
+```text
+missing_node_type
+Node 'MarkdownNote' not found
+Node ID '#61'
+class_type: MarkdownNote
+```
+
+`MarkdownNote` e um no decorativo/anotacao do workflow UI. Ele nao tem funcao computacional no grafo API e nao deve ser enviado para `POST /prompt`.
+
 ## Alteracao
 
 Arquivo alterado:
@@ -40,6 +53,35 @@ output_upload_status=not_attempted
 ```
 
 e ainda faz upload normal do `final_report.json` para R2.
+
+## Correcao Aplicada
+
+Antes de converter/enviar o workflow para `/prompt`, o worker agora remove nos decorativos destes tipos:
+
+```text
+MarkdownNote
+Note
+PrimitiveNode
+AnythingEverywhere
+Reroute
+```
+
+O `final_report.json` passa a incluir:
+
+```text
+workflow_filter_removed_nodes
+workflow_filter_removed_class_type_counts
+workflow_filter_status
+```
+
+Se algum link depender de um no removido, o worker falha antes do POST com:
+
+```text
+runtime_probe_status=workflow_filter_error
+output_upload_status=not_attempted
+```
+
+Para `MarkdownNote`, a expectativa e remocao sem impacto. O payload debug salvo/subido e o payload final ja filtrado.
 
 ## Payload Debug
 
@@ -74,6 +116,12 @@ Esta alteracao:
 - nao executa RunPod;
 - nao faz build/push;
 - nao baixa pesos.
+
+## Proxima Tag Sugerida
+
+```text
+0.1.2
+```
 
 ## Validacoes
 

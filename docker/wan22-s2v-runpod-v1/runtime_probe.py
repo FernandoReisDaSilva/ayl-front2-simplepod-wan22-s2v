@@ -48,6 +48,13 @@ REQUIRED_NODE_CLASSES = (
     "WanVideoAddS2VEmbeds",
     "VHS_VideoCombine",
 )
+DECORATIVE_NODE_TYPES = {
+    "MarkdownNote",
+    "Note",
+    "PrimitiveNode",
+    "AnythingEverywhere",
+    "Reroute",
+}
 
 
 class ComfyPromptHTTPError(RuntimeError):
@@ -272,6 +279,72 @@ def link_lookup(workflow: dict) -> dict[int, list]:
     return {int(link[0]): [str(link[1]), int(link[2])] for link in workflow.get("links", [])}
 
 
+def filter_ui_workflow_for_api(workflow: dict) -> tuple[dict, dict]:
+    removed_ids = {
+        str(node.get("id"))
+        for node in workflow.get("nodes", [])
+        if node.get("type") in DECORATIVE_NODE_TYPES
+    }
+    removed_nodes = []
+    class_counts: dict[str, int] = {}
+    filtered_nodes = []
+    for node in workflow.get("nodes", []):
+        node_id = str(node.get("id"))
+        node_type = str(node.get("type", ""))
+        if node_id in removed_ids:
+            removed_nodes.append({"id": node_id, "class_type": node_type, "title": node.get("title", "")})
+            class_counts[node_type] = class_counts.get(node_type, 0) + 1
+            continue
+        filtered_nodes.append(node)
+
+    dependent_links = []
+    removed_link_ids = set()
+    for link in workflow.get("links", []):
+        if len(link) < 4:
+            continue
+        link_id = str(link[0])
+        source_node_id = str(link[1])
+        target_node_id = str(link[3])
+        if source_node_id in removed_ids or target_node_id in removed_ids:
+            removed_link_ids.add(link_id)
+            dependent_links.append(
+                {
+                    "link_id": link_id,
+                    "source_node_id": source_node_id,
+                    "target_node_id": target_node_id,
+                    "link": link,
+                }
+            )
+
+    dependent_inputs = []
+    for node in filtered_nodes:
+        for item in node.get("inputs", []):
+            link_id = item.get("link")
+            if link_id is not None and str(link_id) in removed_link_ids:
+                dependent_inputs.append(
+                    {
+                        "node_id": str(node.get("id")),
+                        "class_type": node.get("type", ""),
+                        "input_name": item.get("name", ""),
+                        "link_id": str(link_id),
+                    }
+                )
+
+    status = "error" if dependent_links or dependent_inputs else "ok"
+    filtered_workflow = {**workflow, "nodes": filtered_nodes}
+    if status == "ok":
+        filtered_workflow["links"] = [
+            link for link in workflow.get("links", []) if str(link[0]) not in removed_link_ids
+        ]
+    return filtered_workflow, {
+        "workflow_filter_status": status,
+        "workflow_filter_removed_nodes": removed_nodes,
+        "workflow_filter_removed_class_type_counts": class_counts,
+        "workflow_filter_dependent_links": dependent_links,
+        "workflow_filter_dependent_inputs": dependent_inputs,
+    }
+
+
 def input_order(class_info: dict) -> list[str]:
     info = class_info.get("input", {})
     names = []
@@ -287,7 +360,7 @@ def convert_ui_workflow_to_api(workflow: dict, object_info: dict) -> dict:
     prompt = {}
     for node in workflow.get("nodes", []):
         node_type = node.get("type")
-        if not node_type or node_type == "Note":
+        if not node_type or node_type in DECORATIVE_NODE_TYPES:
             continue
         node_id = str(node["id"])
         if node_type not in object_info:
@@ -489,7 +562,20 @@ def build_report(mode: str) -> dict:
             return report
 
         workflow = json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
-        prompt = patch_prompt(convert_ui_workflow_to_api(workflow, object_info))
+        filtered_workflow, workflow_filter = filter_ui_workflow_for_api(workflow)
+        report.update(workflow_filter)
+        if workflow_filter["workflow_filter_status"] != "ok":
+            report.update(
+                {
+                    "runtime_probe_status": "workflow_filter_error",
+                    "output_upload_status": "not_attempted",
+                    "error_truncated": "Decorative workflow node removal would break one or more links.",
+                }
+            )
+            write_progress(mode, "workflow_filter_error", workflow_filter)
+            return report
+
+        prompt = patch_prompt(convert_ui_workflow_to_api(filtered_workflow, object_info))
         report["prompt_node_count"] = len(prompt)
         report["workflow_control_node_ids"] = {"sampler": 27, "s2v_embeds": 101, "image": 73, "audio": 94, "video_combine": [30, 97]}
         write_progress(mode, "comfyui_prompt_ready", {"prompt_node_count": len(prompt)})
