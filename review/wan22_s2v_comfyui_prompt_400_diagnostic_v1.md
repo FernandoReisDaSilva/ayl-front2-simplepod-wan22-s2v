@@ -94,6 +94,47 @@ link 161: PrimitiveNode 71 -> WanVideoAddS2VEmbeds 101 input frame_window_size
 
 Por isso, `PrimitiveNode` deixou de ser tratado como decorativo/removivel. Se ele voltar a gerar erro no `/prompt`, a proxima correcao deve converter `PrimitiveNode` para literal no payload API, nao remove-lo.
 
+## Ajuste Pos 0.1.3
+
+No probe `0.1.3`, o ComfyUI confirmou a ausencia de:
+
+```text
+missing_node_type
+Node 'MelBandRoFormerModelLoader' not found
+Node ID '#81'
+class_type: MelBandRoFormerModelLoader
+```
+
+Decisao V1: `MelBandRoFormer` nao entra no conjunto minimo de pesos/nos porque o audio Mae usado no probe ja esta isolado.
+
+O worker agora tenta aplicar um bypass especifico da cadeia de separacao de audio antes do POST:
+
+```text
+VHS_LoadAudio -> AudioEncoderEncode
+```
+
+Quando seguro, o `final_report.json` inclui:
+
+```text
+melband_bypass_status=ok
+melband_bypass_removed_nodes
+melband_bypass_removed_links
+melband_bypass_new_links
+melband_bypass_audio_source_node
+melband_bypass_audio_target_node
+```
+
+Se a topologia nao for segura, o worker falha antes do POST com:
+
+```text
+runtime_probe_status=melband_bypass_error
+output_upload_status=not_attempted
+melband_bypass_status=error
+melband_bypass_error
+melband_bypass_detected_nodes
+melband_bypass_detected_links
+```
+
 ## Payload Debug
 
 O prompt enviado ao ComfyUI e salvo localmente antes do POST:
@@ -131,7 +172,7 @@ Esta alteracao:
 ## Proxima Tag Sugerida
 
 ```text
-0.1.3
+0.1.4
 ```
 
 ## Validacoes

@@ -423,6 +423,177 @@ def patch_prompt(prompt: dict) -> dict:
     return prompt
 
 
+def is_prompt_link(value) -> bool:
+    return isinstance(value, list) and len(value) == 2 and isinstance(value[0], str | int)
+
+
+def prompt_links(prompt: dict) -> list[dict]:
+    links = []
+    for target_node_id, node in prompt.items():
+        for input_name, value in node.get("inputs", {}).items():
+            if is_prompt_link(value):
+                links.append(
+                    {
+                        "source_node_id": str(value[0]),
+                        "source_output_index": int(value[1]),
+                        "target_node_id": str(target_node_id),
+                        "target_input_name": input_name,
+                    }
+                )
+    return links
+
+
+def class_type(prompt: dict, node_id: str) -> str:
+    return str(prompt.get(str(node_id), {}).get("class_type", ""))
+
+
+def detect_melband_nodes(prompt: dict) -> dict:
+    links = prompt_links(prompt)
+    load_audio_nodes = [node_id for node_id, node in prompt.items() if node.get("class_type") == "VHS_LoadAudio"]
+    audio_encoder_nodes = [node_id for node_id, node in prompt.items() if node.get("class_type") == "AudioEncoderEncode"]
+    s2v_nodes = [node_id for node_id, node in prompt.items() if node.get("class_type") == "WanVideoAddS2VEmbeds"]
+    melband_nodes = [
+        node_id
+        for node_id, node in prompt.items()
+        if "MelBandRoFormer" in str(node.get("class_type", ""))
+    ]
+    normalize_audio_nodes = [
+        node_id for node_id, node in prompt.items() if node.get("class_type") == "NormalizeAudioLoudness"
+    ]
+    return {
+        "load_audio_nodes": [{"id": node_id, "class_type": class_type(prompt, node_id)} for node_id in load_audio_nodes],
+        "audio_encoder_nodes": [{"id": node_id, "class_type": class_type(prompt, node_id)} for node_id in audio_encoder_nodes],
+        "s2v_nodes": [{"id": node_id, "class_type": class_type(prompt, node_id)} for node_id in s2v_nodes],
+        "melband_nodes": [{"id": node_id, "class_type": class_type(prompt, node_id)} for node_id in melband_nodes],
+        "normalize_audio_nodes": [{"id": node_id, "class_type": class_type(prompt, node_id)} for node_id in normalize_audio_nodes],
+        "melband_related_links": [
+            link
+            for link in links
+            if link["source_node_id"] in set(melband_nodes + normalize_audio_nodes)
+            or link["target_node_id"] in set(melband_nodes + normalize_audio_nodes)
+        ],
+    }
+
+
+def melband_bypass_error(message: str, prompt: dict, detected: dict) -> dict:
+    return {
+        "melband_bypass_status": "error",
+        "melband_bypass_error": message,
+        "melband_bypass_detected_nodes": detected,
+        "melband_bypass_detected_links": detected.get("melband_related_links", []),
+        "melband_bypass_removed_nodes": [],
+        "melband_bypass_removed_links": [],
+        "melband_bypass_new_links": [],
+        "melband_bypass_audio_source_node": "",
+        "melband_bypass_audio_target_node": "",
+    }
+
+
+def apply_melband_bypass(prompt: dict) -> tuple[dict, dict]:
+    detected = detect_melband_nodes(prompt)
+    melband_ids = {item["id"] for item in detected["melband_nodes"]}
+    if not melband_ids:
+        return prompt, {
+            "melband_bypass_status": "not_needed",
+            "melband_bypass_error": "",
+            "melband_bypass_detected_nodes": detected,
+            "melband_bypass_detected_links": [],
+            "melband_bypass_removed_nodes": [],
+            "melband_bypass_removed_links": [],
+            "melband_bypass_new_links": [],
+            "melband_bypass_audio_source_node": "",
+            "melband_bypass_audio_target_node": "",
+        }
+
+    load_audio_ids = [item["id"] for item in detected["load_audio_nodes"]]
+    audio_encoder_ids = [item["id"] for item in detected["audio_encoder_nodes"]]
+    if len(load_audio_ids) != 1:
+        return prompt, melband_bypass_error("Expected exactly one VHS_LoadAudio node.", prompt, detected)
+    if len(audio_encoder_ids) != 1:
+        return prompt, melband_bypass_error("Expected exactly one AudioEncoderEncode node.", prompt, detected)
+
+    audio_source_id = load_audio_ids[0]
+    audio_target_id = audio_encoder_ids[0]
+    audio_target = prompt.get(audio_target_id, {})
+    audio_input_names = [
+        input_name
+        for input_name, value in audio_target.get("inputs", {}).items()
+        if is_prompt_link(value) and str(value[0]) != audio_source_id
+    ]
+    if len(audio_input_names) != 1:
+        return prompt, melband_bypass_error(
+            "Could not identify exactly one linked audio input on AudioEncoderEncode.",
+            prompt,
+            detected,
+        )
+
+    links = prompt_links(prompt)
+    outgoing: dict[str, list[dict]] = {}
+    for link in links:
+        outgoing.setdefault(link["source_node_id"], []).append(link)
+
+    removable_ids = set(melband_ids)
+    queue = list(melband_ids)
+    while queue:
+        current = queue.pop(0)
+        for link in outgoing.get(current, []):
+            target_id = link["target_node_id"]
+            target_class = class_type(prompt, target_id)
+            if target_id == audio_target_id:
+                continue
+            if target_class in {"NormalizeAudioLoudness"} or "MelBandRoFormer" in target_class:
+                if target_id not in removable_ids:
+                    removable_ids.add(target_id)
+                    queue.append(target_id)
+
+    removed_nodes = [
+        {"id": node_id, "class_type": class_type(prompt, node_id)}
+        for node_id in sorted(removable_ids, key=lambda value: int(value) if value.isdigit() else value)
+    ]
+    removed_links = [
+        link
+        for link in links
+        if link["source_node_id"] in removable_ids or link["target_node_id"] in removable_ids
+    ]
+    patched_prompt = {
+        node_id: node
+        for node_id, node in prompt.items()
+        if node_id not in removable_ids
+    }
+    audio_input_name = audio_input_names[0]
+    old_audio_input = patched_prompt[audio_target_id]["inputs"].get(audio_input_name)
+    patched_prompt[audio_target_id]["inputs"][audio_input_name] = [audio_source_id, 0]
+    new_link = {
+        "source_node_id": audio_source_id,
+        "source_output_index": 0,
+        "target_node_id": audio_target_id,
+        "target_input_name": audio_input_name,
+        "replaced_value": old_audio_input,
+    }
+    remaining_bad_links = [
+        link
+        for link in prompt_links(patched_prompt)
+        if link["source_node_id"] in removable_ids or link["target_node_id"] in removable_ids
+    ]
+    if remaining_bad_links:
+        return prompt, melband_bypass_error(
+            "Bypass left links connected to removed MelBand nodes.",
+            prompt,
+            {**detected, "remaining_bad_links": remaining_bad_links},
+        )
+    return patched_prompt, {
+        "melband_bypass_status": "ok",
+        "melband_bypass_error": "",
+        "melband_bypass_detected_nodes": detected,
+        "melband_bypass_detected_links": detected.get("melband_related_links", []),
+        "melband_bypass_removed_nodes": removed_nodes,
+        "melband_bypass_removed_links": removed_links,
+        "melband_bypass_new_links": [new_link],
+        "melband_bypass_audio_source_node": audio_source_id,
+        "melband_bypass_audio_target_node": audio_target_id,
+    }
+
+
 def truncate_text(value: str, limit: int = MAX_COMFYUI_ERROR_TEXT_CHARS) -> str:
     if len(value) <= limit:
         return value
@@ -582,6 +753,18 @@ def build_report(mode: str) -> dict:
             return report
 
         prompt = patch_prompt(convert_ui_workflow_to_api(filtered_workflow, object_info))
+        prompt, melband_bypass = apply_melband_bypass(prompt)
+        report.update(melband_bypass)
+        if melband_bypass["melband_bypass_status"] == "error":
+            report.update(
+                {
+                    "runtime_probe_status": "melband_bypass_error",
+                    "output_upload_status": "not_attempted",
+                    "error_truncated": melband_bypass["melband_bypass_error"],
+                }
+            )
+            write_progress(mode, "melband_bypass_error", melband_bypass)
+            return report
         report["prompt_node_count"] = len(prompt)
         report["workflow_control_node_ids"] = {"sampler": 27, "s2v_embeds": 101, "image": 73, "audio": 94, "video_combine": [30, 97]}
         write_progress(mode, "comfyui_prompt_ready", {"prompt_node_count": len(prompt)})
