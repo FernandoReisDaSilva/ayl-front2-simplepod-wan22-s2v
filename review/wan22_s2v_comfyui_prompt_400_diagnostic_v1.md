@@ -261,6 +261,73 @@ primitive_resolve_detected_nodes
 primitive_resolve_detected_links
 ```
 
+## Ajuste Pos 0.1.7
+
+No probe `0.1.7`, o erro `PrimitiveNode` continuou e o `final_report.json` veio sem campos `primitive_resolve_*`, indicando que o resolver nao executou no fluxo real antes do `POST /prompt` ou nao entrou na tag testada.
+
+Correcao aplicada: a etapa `resolve_primitive_nodes` fica obrigatoriamente depois de:
+
+```text
+workflow_filter
+melband_bypass
+gimmvfi_bypass
+```
+
+e antes de:
+
+```text
+payload debug
+POST /prompt
+```
+
+O `final_report.json` agora sempre inclui, mesmo quando nao houver `PrimitiveNode`:
+
+```text
+primitive_resolve_status
+primitive_resolve_detected_nodes
+primitive_resolve_resolved_nodes
+primitive_resolve_replaced_inputs
+primitive_resolve_removed_links
+primitive_resolve_remaining_primitive_nodes
+```
+
+Para `PrimitiveNode` `71` / `num_frames`, quando nao houver valor explicito no payload/API, o fallback V1 fica registrado:
+
+```text
+primitive_resolve_fallback_used=true
+primitive_resolve_fallback_reason=PrimitiveNode num_frames value not found in API payload; using V1 probe fallback 81
+```
+
+Se ainda restar `PrimitiveNode` no payload final, o worker falha antes do POST com:
+
+```text
+runtime_probe_status=primitive_resolve_error
+output_upload_status=not_attempted
+primitive_resolve_status=error
+primitive_resolve_error=PrimitiveNode remained in final payload
+```
+
+## Revisao Pre 0.1.8
+
+O grep ainda mostrava `PrimitiveNode` perto da lista de filtros, mas ele estava na lista de preservacao/relatorio, nao em `DECORATIVE_NODE_TYPES`.
+
+Para evitar ambiguidade antes da tag, a constante foi renomeada para:
+
+```text
+REPORT_ONLY_NON_DECORATIVE_NODE_TYPES
+```
+
+`DECORATIVE_NODE_TYPES` continua contendo somente:
+
+```text
+MarkdownNote
+Note
+AnythingEverywhere
+Reroute
+```
+
+`PrimitiveNode` continua sendo tratado apenas por `resolve_primitive_nodes()`, depois de `workflow_filter`, `melband_bypass` e `gimmvfi_bypass`, antes do payload debug e antes do `POST /prompt`.
+
 ## Payload Debug
 
 O prompt enviado ao ComfyUI e salvo localmente antes do POST:
@@ -298,7 +365,7 @@ Esta alteracao:
 ## Proxima Tag Sugerida
 
 ```text
-0.1.7
+0.1.8
 ```
 
 ## Validacoes

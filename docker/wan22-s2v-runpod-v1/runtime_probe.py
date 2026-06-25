@@ -54,7 +54,7 @@ DECORATIVE_NODE_TYPES = {
     "AnythingEverywhere",
     "Reroute",
 }
-NON_DECORATIVE_NODE_TYPES_TO_PRESERVE = {
+REPORT_ONLY_NON_DECORATIVE_NODE_TYPES = {
     "PrimitiveNode",
 }
 
@@ -298,7 +298,7 @@ def filter_ui_workflow_for_api(workflow: dict) -> tuple[dict, dict]:
             removed_nodes.append({"id": node_id, "class_type": node_type, "title": node.get("title", "")})
             class_counts[node_type] = class_counts.get(node_type, 0) + 1
             continue
-        if node_type in NON_DECORATIVE_NODE_TYPES_TO_PRESERVE:
+        if node_type in REPORT_ONLY_NON_DECORATIVE_NODE_TYPES:
             preserved_non_decorative.add(node_type)
         filtered_nodes.append(node)
 
@@ -762,16 +762,16 @@ def workflow_node_lookup(workflow: dict) -> dict[str, dict]:
     return {str(node.get("id")): node for node in workflow.get("nodes", [])}
 
 
-def primitive_literal_from_workflow_node(node: dict) -> tuple[object, str]:
+def primitive_literal_from_workflow_node(node: dict) -> tuple[object, str, bool, str]:
     widgets = node.get("widgets_values")
     if isinstance(widgets, dict):
         for key in ("value", "num_frames", "number", "int", "float"):
             if key in widgets:
-                return widgets[key], f"widgets_values.{key}"
+                return widgets[key], f"widgets_values.{key}", False, ""
         candidates = [(key, value) for key, value in widgets.items() if key != "videopreview"]
         if len(candidates) == 1:
             key, value = candidates[0]
-            return value, f"widgets_values.{key}"
+            return value, f"widgets_values.{key}", False, ""
     if isinstance(widgets, list):
         scalar_values = [
             value
@@ -779,12 +779,13 @@ def primitive_literal_from_workflow_node(node: dict) -> tuple[object, str]:
             if isinstance(value, str | int | float | bool) or value is None
         ]
         if len(scalar_values) == 1:
-            return scalar_values[0], "widgets_values[0]"
+            return scalar_values[0], "widgets_values[0]", False, ""
 
     title = str(node.get("title", "")).strip().lower()
     if title == "num_frames":
-        return env_int("WAN22_S2V_NUM_FRAMES", 81), "env:WAN22_S2V_NUM_FRAMES default 81"
-    return None, ""
+        reason = "PrimitiveNode num_frames value not found in API payload; using V1 probe fallback 81"
+        return env_int("WAN22_S2V_NUM_FRAMES", 81), "env:WAN22_S2V_NUM_FRAMES default 81", True, reason
+    return None, "", False, ""
 
 
 def detect_primitive_nodes(prompt: dict, workflow: dict) -> dict:
@@ -817,7 +818,15 @@ def detect_primitive_nodes(prompt: dict, workflow: dict) -> dict:
     }
 
 
-def primitive_resolve_error(message: str, detected: dict) -> dict:
+def remaining_primitive_nodes(prompt: dict) -> list[dict]:
+    return [
+        {"id": node_id, "class_type": class_type(prompt, node_id)}
+        for node_id, node in prompt.items()
+        if node.get("class_type") == "PrimitiveNode"
+    ]
+
+
+def primitive_resolve_error(message: str, detected: dict, prompt: dict) -> dict:
     return {
         "primitive_resolve_status": "error",
         "primitive_resolve_error": message,
@@ -829,6 +838,9 @@ def primitive_resolve_error(message: str, detected: dict) -> dict:
         "primitive_resolve_node_id": "",
         "primitive_resolve_title": "",
         "primitive_resolve_targets": [],
+        "primitive_resolve_fallback_used": False,
+        "primitive_resolve_fallback_reason": "",
+        "primitive_resolve_remaining_primitive_nodes": remaining_primitive_nodes(prompt),
     }
 
 
@@ -847,6 +859,9 @@ def resolve_primitive_nodes(prompt: dict, workflow: dict) -> tuple[dict, dict]:
             "primitive_resolve_node_id": "",
             "primitive_resolve_title": "",
             "primitive_resolve_targets": [],
+            "primitive_resolve_fallback_used": False,
+            "primitive_resolve_fallback_reason": "",
+            "primitive_resolve_remaining_primitive_nodes": [],
         }
 
     workflow_nodes = workflow_node_lookup(workflow)
@@ -854,13 +869,18 @@ def resolve_primitive_nodes(prompt: dict, workflow: dict) -> tuple[dict, dict]:
     resolved_nodes = []
     replaced_inputs = []
     removed_links = []
+    fallback_used = False
+    fallback_reason = ""
     for primitive in primitive_nodes:
         node_id = primitive["id"]
         if primitive["incoming_links"]:
-            return prompt, primitive_resolve_error(f"PrimitiveNode {node_id} has incoming links.", detected)
-        value, source = primitive_literal_from_workflow_node(workflow_nodes.get(node_id, {}))
+            return prompt, primitive_resolve_error(f"PrimitiveNode {node_id} has incoming links.", detected, prompt)
+        value, source, used_fallback, reason = primitive_literal_from_workflow_node(workflow_nodes.get(node_id, {}))
         if primitive["outgoing_links"] and not source:
-            return prompt, primitive_resolve_error(f"Could not resolve literal value for PrimitiveNode {node_id}.", detected)
+            return prompt, primitive_resolve_error(f"Could not resolve literal value for PrimitiveNode {node_id}.", detected, prompt)
+        if used_fallback:
+            fallback_used = True
+            fallback_reason = reason
         for link in primitive["outgoing_links"]:
             target_id = link["target_node_id"]
             input_name = link["target_input_name"]
@@ -868,6 +888,7 @@ def resolve_primitive_nodes(prompt: dict, workflow: dict) -> tuple[dict, dict]:
                 return prompt, primitive_resolve_error(
                     f"PrimitiveNode {node_id} target node {target_id} is missing.",
                     detected,
+                    prompt,
                 )
             old_value = patched_prompt[target_id].get("inputs", {}).get(input_name)
             patched_prompt[target_id].setdefault("inputs", {})[input_name] = value
@@ -896,6 +917,24 @@ def resolve_primitive_nodes(prompt: dict, workflow: dict) -> tuple[dict, dict]:
             }
         )
 
+    remaining = remaining_primitive_nodes(patched_prompt)
+    if remaining:
+        return prompt, {
+            "primitive_resolve_status": "error",
+            "primitive_resolve_error": "PrimitiveNode remained in final payload",
+            "primitive_resolve_detected_nodes": detected.get("primitive_nodes", []),
+            "primitive_resolve_detected_links": detected.get("primitive_links", []),
+            "primitive_resolve_resolved_nodes": resolved_nodes,
+            "primitive_resolve_replaced_inputs": replaced_inputs,
+            "primitive_resolve_removed_links": removed_links,
+            "primitive_resolve_node_id": "",
+            "primitive_resolve_title": "",
+            "primitive_resolve_targets": [],
+            "primitive_resolve_fallback_used": fallback_used,
+            "primitive_resolve_fallback_reason": fallback_reason,
+            "primitive_resolve_remaining_primitive_nodes": remaining,
+        }
+
     primary = next((node for node in resolved_nodes if node["id"] == "71"), resolved_nodes[0])
     primary_targets = [
         {
@@ -918,6 +957,9 @@ def resolve_primitive_nodes(prompt: dict, workflow: dict) -> tuple[dict, dict]:
         "primitive_resolve_node_id": primary["id"],
         "primitive_resolve_title": primary.get("title", ""),
         "primitive_resolve_targets": primary_targets,
+        "primitive_resolve_fallback_used": fallback_used,
+        "primitive_resolve_fallback_reason": fallback_reason,
+        "primitive_resolve_remaining_primitive_nodes": remaining,
     }
 
 
