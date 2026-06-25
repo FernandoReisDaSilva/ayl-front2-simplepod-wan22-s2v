@@ -21,6 +21,8 @@ DEFAULT_REFERENCE_KEY = "tests/runpod_wan22_s2v_probe_v1/input/mae_reference.png
 DEFAULT_AUDIO_KEY = "tests/runpod_wan22_s2v_probe_v1/input/mae_audio_5s.wav"
 DEFAULT_OUTPUT_KEY = "tests/runpod_wan22_s2v_probe_v1/output/video_out.mp4"
 DEFAULT_MODEL_PREFIX = "checkpoints/wan22_s2v/comfyui_models/"
+DEFAULT_PROMPT_DEBUG_KEY = "tests/runpod_wan22_s2v_probe_v1/debug/prompt_payload_debug.json"
+MAX_COMFYUI_ERROR_TEXT_CHARS = 50000
 
 COMFYUI_PATH = Path(os.getenv("COMFYUI_PATH", "/opt/ComfyUI"))
 WORKSPACE = Path("/workspace")
@@ -29,6 +31,7 @@ OUTPUT_DIR = WORKSPACE / "output"
 REFERENCE_PATH = INPUT_DIR / "mae_reference.png"
 AUDIO_PATH = INPUT_DIR / "mae_audio_5s.wav"
 OUTPUT_PATH = OUTPUT_DIR / "video_out.mp4"
+PROMPT_DEBUG_PATH = WORKSPACE / "wan22_s2v_prompt_payload_debug.json"
 WORKFLOW_PATH = Path(os.getenv("AYL_WAN22_S2V_WORKFLOW_PATH", "/opt/ayl/workflows/wanvideo2_2_S2V_context_window_testing.json"))
 COMFY_HOST = os.getenv("AYL_COMFY_HOST", "127.0.0.1")
 COMFY_PORT = int(os.getenv("AYL_COMFY_PORT", "8188"))
@@ -45,6 +48,12 @@ REQUIRED_NODE_CLASSES = (
     "WanVideoAddS2VEmbeds",
     "VHS_VideoCombine",
 )
+
+
+class ComfyPromptHTTPError(RuntimeError):
+    def __init__(self, message: str, diagnostics: dict):
+        super().__init__(message)
+        self.diagnostics = diagnostics
 
 
 def now_iso() -> str:
@@ -140,6 +149,7 @@ def env_presence() -> dict:
         "R2_INPUT_AUDIO_KEY",
         "R2_OUTPUT_VIDEO_KEY",
         "R2_WAN22_MODEL_PREFIX",
+        "R2_PROMPT_PAYLOAD_DEBUG_KEY",
         "WAN22_S2V_CFG",
         "WAN22_S2V_SHIFT",
         "WAN22_S2V_SEED",
@@ -334,9 +344,67 @@ def patch_prompt(prompt: dict) -> dict:
     return prompt
 
 
+def truncate_text(value: str, limit: int = MAX_COMFYUI_ERROR_TEXT_CHARS) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"\n... truncated {len(value) - limit} chars ..."
+
+
+def prompt_payload_summary(payload: dict, debug_upload_status: str, debug_key: str) -> dict:
+    prompt = payload.get("prompt", {})
+    class_counts: dict[str, int] = {}
+    for node in prompt.values():
+        class_type = str(node.get("class_type", ""))
+        if class_type:
+            class_counts[class_type] = class_counts.get(class_type, 0) + 1
+    return {
+        "client_id": payload.get("client_id", ""),
+        "prompt_node_count": len(prompt),
+        "prompt_node_ids_sample": list(prompt.keys())[:50],
+        "class_type_counts": class_counts,
+        "payload_debug_local_path": str(PROMPT_DEBUG_PATH),
+        "payload_debug_r2_key": debug_key,
+        "payload_debug_upload_status": debug_upload_status,
+        "payload_json_size_bytes": PROMPT_DEBUG_PATH.stat().st_size if PROMPT_DEBUG_PATH.exists() else 0,
+    }
+
+
+def response_json_or_none(response: requests.Response):
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+
+def relevant_response_headers(response: requests.Response) -> dict:
+    relevant = {}
+    for key, value in response.headers.items():
+        lower_key = key.lower()
+        if lower_key in {"content-type", "content-length", "server", "date"} or lower_key.startswith("x-"):
+            relevant[key] = value
+    return relevant
+
+
 def queue_prompt(prompt: dict) -> str:
     payload = {"prompt": prompt, "client_id": str(uuid.uuid4())}
+    PROMPT_DEBUG_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    debug_key = os.getenv("R2_PROMPT_PAYLOAD_DEBUG_KEY", DEFAULT_PROMPT_DEBUG_KEY)
+    debug_upload_status = "not_attempted"
+    try:
+        upload_r2_file(PROMPT_DEBUG_PATH, debug_key)
+        debug_upload_status = "ok"
+    except Exception as exc:
+        debug_upload_status = f"failed: {str(exc)[:500]}"
     response = requests.post(f"{COMFY_BASE}/prompt", json=payload, timeout=30)
+    if response.status_code >= 400:
+        diagnostics = {
+            "comfyui_prompt_status_code": response.status_code,
+            "comfyui_prompt_response_text": truncate_text(response.text),
+            "comfyui_prompt_response_json": response_json_or_none(response),
+            "comfyui_prompt_response_headers": relevant_response_headers(response),
+            "comfyui_prompt_payload_summary": prompt_payload_summary(payload, debug_upload_status, debug_key),
+        }
+        raise ComfyPromptHTTPError(f"ComfyUI /prompt returned HTTP {response.status_code}", diagnostics)
     response.raise_for_status()
     data = response.json()
     if "prompt_id" not in data:
@@ -426,7 +494,26 @@ def build_report(mode: str) -> dict:
         report["workflow_control_node_ids"] = {"sampler": 27, "s2v_embeds": 101, "image": 73, "audio": 94, "video_combine": [30, 97]}
         write_progress(mode, "comfyui_prompt_ready", {"prompt_node_count": len(prompt)})
 
-        prompt_id = queue_prompt(prompt)
+        try:
+            prompt_id = queue_prompt(prompt)
+        except ComfyPromptHTTPError as exc:
+            report.update(
+                {
+                    "runtime_probe_status": "comfyui_prompt_http_error",
+                    "output_upload_status": "not_attempted",
+                    "error_truncated": str(exc)[:2000],
+                    **exc.diagnostics,
+                }
+            )
+            write_progress(
+                mode,
+                "comfyui_prompt_http_error",
+                {
+                    "comfyui_prompt_status_code": exc.diagnostics.get("comfyui_prompt_status_code"),
+                    "comfyui_prompt_payload_summary": exc.diagnostics.get("comfyui_prompt_payload_summary", {}),
+                },
+            )
+            return report
         report["comfyui_prompt_id"] = prompt_id
         write_progress(mode, "comfyui_prompt_queued", {"prompt_id": prompt_id})
         history = wait_prompt(prompt_id, env_int("WAN22_S2V_PROMPT_TIMEOUT_SECONDS", 1800))
