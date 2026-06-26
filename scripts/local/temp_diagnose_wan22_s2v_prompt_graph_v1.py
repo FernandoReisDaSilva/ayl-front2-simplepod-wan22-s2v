@@ -32,6 +32,30 @@ EMBED_INPUT_NAMES = {
     "audio_embeds",
     "clip_embeds",
 }
+STRUCTURAL_INPUT_NAME_TOKENS = ("latent", "latents", "embed", "embeds", "args", "mask", "image", "audio")
+SCALAR_INPUT_ALLOWLIST = {
+    "width",
+    "height",
+    "num_frames",
+    "frame_window_size",
+    "steps",
+    "cfg",
+    "shift",
+    "seed",
+    "denoise_strength",
+    "audio_scale",
+    "pose_start_percent",
+    "pose_end_percent",
+    "precision",
+    "base_precision",
+    "quantization",
+    "attention_mode",
+    "device",
+    "scheduler",
+    "riflex_freq_index",
+    "normalization",
+    "noise_aug_strength",
+}
 
 
 def now_iso() -> str:
@@ -108,6 +132,48 @@ def prompt_value_is_link(value) -> bool:
 
 def prompt_value_is_literal(value) -> bool:
     return isinstance(value, (str, int, float, bool)) or value is None
+
+
+def input_name_is_structural(input_name: str) -> bool:
+    lower_name = input_name.lower()
+    return any(token in lower_name for token in STRUCTURAL_INPUT_NAME_TOKENS)
+
+
+def local_wanvideo_structural_literal_errors(prompt: dict, object_info: dict | None = None) -> list[dict]:
+    errors = []
+    object_info = object_info or {}
+    for node_id, node in prompt.items():
+        class_type = str(node.get("class_type", ""))
+        if not class_type.startswith("WanVideo"):
+            continue
+        for input_name, value in node.get("inputs", {}).items():
+            if not isinstance(value, (int, str, bool)):
+                continue
+            if not input_name_is_structural(input_name):
+                continue
+            if input_name in SCALAR_INPUT_ALLOWLIST:
+                continue
+            spec = None
+            class_info = object_info.get(class_type, {})
+            for section in ("required", "optional"):
+                values = class_info.get("input", {}).get(section, {}) if isinstance(class_info, dict) else {}
+                if isinstance(values, dict) and input_name in values:
+                    spec = values[input_name]
+                    break
+            if input_name == "latent_strength" and isinstance(spec, (list, tuple)) and spec and spec[0] == "FLOAT":
+                continue
+            errors.append(
+                {
+                    "node_id": node_id,
+                    "class_type": class_type,
+                    "input_name": input_name,
+                    "value": value,
+                    "value_type": type(value).__name__,
+                    "object_info_spec": spec,
+                    "reason": "wanvideo_structural_literal_error",
+                }
+            )
+    return errors
 
 
 def safe_repr(value, limit: int = 220) -> str:
@@ -251,7 +317,7 @@ def diagnose_prompt_inputs(prompt: dict, object_info: dict | None = None) -> dic
                 suspicious_values.append({**item, "reason": "device_string_in_non_device_input"})
 
     return {
-        "structural_errors": structural_errors,
+        "structural_errors": structural_errors + local_wanvideo_structural_literal_errors(prompt, object_info),
         "literal_where_link_expected": literal_where_link_expected,
         "wanvideo_optional_misaligned": wanvideo_optional_misaligned,
         "s2v_embed_inputs": special_s2v_inputs,
@@ -313,12 +379,12 @@ def render_markdown(report: dict) -> str:
         f"- final_report: `{report.get('final_report_path') or 'nao encontrado'}`",
         f"- prompt_source: `{report.get('prompt_source')}`",
         "",
-        "## Estado Do Probe 0.1.13",
+        "## Estado Do Probe 0.1.15",
         "",
-        "- contexto informado: `0.1.13 passou missing nodes, MelBand, GIMMVFI, PrimitiveNode, validation, SageAttention, fp16_fast, ImageResize mask e Lanczos GPU`",
+        "- contexto informado: `0.1.15 passou WanVideoEmptyEmbeds control_embeds e extra_latents`",
         "- novo erro informado: `TypeError: 'int' object is not subscriptable`",
-        "- ponto informado: `ComfyUI-WanVideoWrapper/nodes.py line 1438 control_embeds[\"control_embeds\"]`",
-        "- interpretacao: `ha desalinhamentos remanescentes de links/inputs no payload API`",
+        "- ponto informado: `s2v/nodes.py line 114 pose_latent[\"samples\"]`",
+        "- interpretacao: `WanVideoAddS2VEmbeds.pose_latent=1 e outros literais estruturais precisam de saneamento em lote`",
         "",
         "## Final Report Local Disponivel",
         "",
@@ -379,18 +445,18 @@ def render_markdown(report: dict) -> str:
             prompt_diag.get("wanvideo_optional_misaligned", []),
             ["node_id", "class_type", "input_name", "reason", "value"],
         ),
-        "## Fixes Propostos Para Tag 0.1.15",
+        "## Fixes Propostos Para Tag 0.1.16",
         "",
-        "1. `0.1.14` corrigiu `control_embeds=832` no `WanVideoEmptyEmbeds` node `37`.",
-        "2. O novo bloqueio confirmou `extra_latents=480` como literal `int` no mesmo node.",
-        "3. Decisao V1: no probe minimo, remover `control_embeds` e `extra_latents` quando o input for opcional; caso contrario, setar `None`.",
+        "1. `0.1.15` corrigiu `control_embeds=832` e `extra_latents=480` no `WanVideoEmptyEmbeds` node `37`.",
+        "2. O novo bloqueio confirmou `WanVideoAddS2VEmbeds.pose_latent=1` como literal `int`.",
+        "3. Decisao V1: sanitizar genericamente literais estruturais em `WanVideo*` quando o input parecer `latent`, `embed`, `args`, `mask`, `image` ou `audio`, preservando apenas allowlist escalar explicita.",
         "4. Manter o preflight `preflight_prompt_semantics(prompt, object_info)` antes do payload debug e antes do POST `/prompt`.",
-        "5. Falhar localmente quando encontrar `WanVideoEmptyEmbeds.control_embeds` ou `WanVideoEmptyEmbeds.extra_latents` como `int`, `str` ou `bool`, alem dos bloqueios ja existentes para `mask` string, HTML string, `lanczos+gpu`, `base_precision` fast ou `attention_mode` sage.",
+        "5. Rodar `temp_test_wan22_s2v_prompt_preflight_suite_v1.py` antes de qualquer nova tag RunPod.",
         "",
         "## Proxima Tag Sugerida",
         "",
         "```text",
-        "0.1.15",
+        "0.1.16",
         "```",
         "",
         "## Observacoes",

@@ -643,10 +643,58 @@ O preflight semantico tambem passa a falhar antes do POST se ainda existir `WanV
 wanvideo_empty_embeds_invalid_extra_latents
 ```
 
+## Ajuste Pos 0.1.15
+
+O probe `0.1.15` passou pelo `WanVideoEmptyEmbeds`:
+
+- `control_embeds=832` removido/neutralizado;
+- `extra_latents=480` removido/neutralizado.
+
+Novo bloqueio no `WanVideoAddS2VEmbeds` node `101`:
+
+```text
+TypeError: 'int' object is not subscriptable
+```
+
+Ponto observado:
+
+```text
+s2v/nodes.py line 114
+"pose_latent": pose_latent["samples"] if pose_latent is not None else None
+```
+
+Input relevante:
+
+```text
+pose_latent=1
+```
+
+Diagnostico: o problema nao e mais isolado a um input. O workflow demo/API ainda carrega literais primitivos em campos que esperam `LATENT`, `EMBEDS`, args object, dict ou tensor-like.
+
+Decisao V1: pausar novas execucoes RunPod e aplicar saneamento offline em lote. O runtime passa a incluir `sanitize_wanvideo_structural_literals(prompt, object_info)`, que neutraliza literais `int`, `str` ou `bool` em inputs estruturais de `WanVideo*` quando nao estiverem na allowlist escalar explicita.
+
+O preflight semantico passa a falhar antes do POST com:
+
+```text
+wanvideo_structural_literal_error
+```
+
+A bateria offline criada em:
+
+```text
+scripts/local/temp_test_wan22_s2v_prompt_preflight_suite_v1.py
+```
+
+gera:
+
+```text
+review/wan22_s2v_offline_preflight_suite_v1.md
+```
+
 ## Proxima Tag Sugerida
 
 ```text
-0.1.15
+0.1.16
 ```
 
 ## Validacoes

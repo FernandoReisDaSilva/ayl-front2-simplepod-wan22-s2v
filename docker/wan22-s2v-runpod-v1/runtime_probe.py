@@ -988,6 +988,62 @@ def input_options(object_info: dict, class_name: str, input_name: str) -> list:
     return []
 
 
+SCALAR_INPUT_ALLOWLIST = {
+    "width",
+    "height",
+    "num_frames",
+    "frame_window_size",
+    "steps",
+    "cfg",
+    "shift",
+    "seed",
+    "denoise_strength",
+    "audio_scale",
+    "pose_start_percent",
+    "pose_end_percent",
+    "precision",
+    "base_precision",
+    "quantization",
+    "attention_mode",
+    "device",
+    "scheduler",
+    "riflex_freq_index",
+    "normalization",
+    "noise_aug_strength",
+}
+STRUCTURAL_INPUT_NAME_TOKENS = ("latent", "latents", "embed", "embeds", "args", "mask", "image", "audio")
+SCALAR_OBJECT_INFO_TYPES = {"INT", "FLOAT", "BOOLEAN", "BOOL", "STRING"}
+
+
+def object_info_type_names(spec) -> set[str]:
+    if isinstance(spec, (list, tuple)) and spec:
+        first = spec[0]
+        if isinstance(first, str):
+            return {first.upper()}
+    return set()
+
+
+def object_info_has_option_list(spec) -> bool:
+    return isinstance(spec, (list, tuple)) and bool(spec) and isinstance(spec[0], list)
+
+
+def object_info_is_clear_scalar(spec) -> bool:
+    return bool(object_info_type_names(spec) & SCALAR_OBJECT_INFO_TYPES) or object_info_has_option_list(spec)
+
+
+def input_name_is_structural(input_name: str) -> bool:
+    lower_name = input_name.lower()
+    return any(token in lower_name for token in STRUCTURAL_INPUT_NAME_TOKENS)
+
+
+def scalar_literal_allowed(class_name: str, input_name: str, spec) -> bool:
+    if input_name in SCALAR_INPUT_ALLOWLIST:
+        return True
+    if input_name == "latent_strength":
+        return "FLOAT" in object_info_type_names(spec)
+    return object_info_is_clear_scalar(spec) and not input_name_is_structural(input_name)
+
+
 def prompt_sanitize_change(changes: list[dict], node_id: str, class_name: str, input_name: str, old_value, new_value, reason: str) -> None:
     if old_value == new_value:
         return
@@ -1387,6 +1443,83 @@ def sanitize_wanvideo_empty_embeds_inputs(prompt: dict, object_info: dict, chang
     }
 
 
+def wanvideo_structural_literal_errors(prompt: dict, object_info: dict) -> list[dict]:
+    errors = []
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        if not class_name.startswith("WanVideo"):
+            continue
+        for input_name, value in node.get("inputs", {}).items():
+            if not isinstance(value, (int, str, bool)):
+                continue
+            if not input_name_is_structural(input_name):
+                continue
+            spec = object_input_spec(object_info, class_name, input_name)
+            if scalar_literal_allowed(class_name, input_name, spec):
+                continue
+            errors.append(
+                {
+                    "node_id": node_id,
+                    "class_type": class_name,
+                    "input_name": input_name,
+                    "value": value,
+                    "value_type": type(value).__name__,
+                    "object_info_spec": spec,
+                    "reason": "wanvideo_structural_literal_error",
+                }
+            )
+    return errors
+
+
+def sanitize_wanvideo_structural_literals(prompt: dict, object_info: dict, changes: list[dict]) -> dict:
+    structural_changes = []
+    detected = wanvideo_structural_literal_errors(prompt, object_info)
+    for item in detected:
+        node_id = item["node_id"]
+        class_name = item["class_type"]
+        input_name = item["input_name"]
+        old_value = prompt[node_id].setdefault("inputs", {}).get(input_name)
+        before = len(changes)
+        if object_input_is_optional(object_info, class_name, input_name):
+            del prompt[node_id]["inputs"][input_name]
+            prompt_sanitize_change(
+                changes,
+                node_id,
+                class_name,
+                input_name,
+                old_value,
+                "<removed>",
+                "remove invalid WanVideo structural literal for V1 minimum probe",
+            )
+        else:
+            prompt[node_id]["inputs"][input_name] = None
+            prompt_sanitize_change(
+                changes,
+                node_id,
+                class_name,
+                input_name,
+                old_value,
+                None,
+                "set invalid WanVideo structural literal to None for V1 minimum probe",
+            )
+        if len(changes) > before:
+            structural_changes.append(changes[-1])
+
+    remaining = wanvideo_structural_literal_errors(prompt, object_info)
+    if structural_changes:
+        policy = "payload_control_applied"
+    elif detected:
+        policy = "detected_no_change_needed"
+    else:
+        policy = "no_wanvideo_structural_literals_found"
+    return {
+        "wanvideo_structural_literal_policy": policy,
+        "wanvideo_structural_literal_detected": detected,
+        "wanvideo_structural_literal_sanitize_changes": structural_changes,
+        "wanvideo_structural_literal_remaining_errors": remaining,
+    }
+
+
 def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]:
     changes: list[dict] = []
     errors: list[str] = []
@@ -1451,6 +1584,7 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
 
     image_resize_report = sanitize_image_resize_inputs(prompt, object_info, changes)
     wanvideo_empty_embeds_report = sanitize_wanvideo_empty_embeds_inputs(prompt, object_info, changes)
+    wanvideo_structural_literal_report = sanitize_wanvideo_structural_literals(prompt, object_info, changes)
     sageattention_report = sanitize_sageattention_inputs(prompt, object_info, changes)
     torch_precision_report = sanitize_torch_precision_inputs(prompt, object_info, changes)
     remaining_suspect_values = []
@@ -1476,6 +1610,8 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
         errors.append("Invalid ImageResizeKJv2 lanczos + gpu combination remains after sanitize.")
     if wanvideo_empty_embeds_report["wanvideo_empty_embeds_remaining_invalid_values"]:
         errors.append("Invalid WanVideoEmptyEmbeds literal values remain after sanitize.")
+    if wanvideo_structural_literal_report["wanvideo_structural_literal_remaining_errors"]:
+        errors.append("Invalid WanVideo structural literal values remain after sanitize.")
     if torch_precision_report["torch_precision_remaining_fast_values"]:
         errors.append("Fast torch precision values remain in prompt inputs after sanitize.")
     return prompt, {
@@ -1485,6 +1621,7 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
         "prompt_sanitize_remaining_suspect_values": remaining_suspect_values,
         **image_resize_report,
         **wanvideo_empty_embeds_report,
+        **wanvideo_structural_literal_report,
         **sageattention_report,
         **torch_precision_report,
     }
@@ -1511,6 +1648,7 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
     wanvideo_empty_embeds_invalid_control_embeds = []
     wanvideo_empty_embeds_invalid_extra_latents = []
     invalid_resize_combinations = []
+    wanvideo_structural_literal_findings = wanvideo_structural_literal_errors(prompt, object_info)
     fast_precision_inputs = []
     sageattention_enabled_inputs = []
     suspicious_inputs = []
@@ -1604,6 +1742,8 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
         errors.append("HTML-like string inputs remain.")
     if invalid_resize_combinations:
         errors.append("ImageResizeKJv2 lanczos + gpu combination remains.")
+    if wanvideo_structural_literal_findings:
+        errors.append("wanvideo_structural_literal_error")
     if fast_precision_inputs:
         errors.append("Fast base_precision values remain.")
     if sageattention_enabled_inputs:
@@ -1620,6 +1760,7 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
         "prompt_semantics_mask_string_inputs": mask_string_inputs,
         "prompt_semantics_html_string_inputs": html_string_inputs,
         "prompt_semantics_invalid_resize_combinations": invalid_resize_combinations,
+        "prompt_semantics_wanvideo_structural_literal_errors": wanvideo_structural_literal_findings,
         "prompt_semantics_fast_precision_inputs": fast_precision_inputs,
         "prompt_semantics_sageattention_enabled_inputs": sageattention_enabled_inputs,
         "prompt_semantics_suspicious_inputs": suspicious_inputs,
