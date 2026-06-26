@@ -732,10 +732,57 @@ wanvideo_sampler_invalid_samples_literal
 
 Saneamento preventivo adicional: o payload bruto tambem mostra `WanVideoSampler.batched_cfg=-1`. Como esse campo deve ser booleano, o sanitizer passa a forcar `False` quando o valor nao for `bool`, e o preflight registra `wanvideo_sampler_invalid_batched_cfg` se escapar.
 
+## Ajuste Pos 0.1.17
+
+O probe `0.1.17` passou pelos bloqueios estruturais anteriores e chegou a execucao real do sampler/modelo.
+
+Novo bloqueio no `WanVideoSampler` node `27`:
+
+```text
+torch._dynamo.exc.BackendCompilerFailed
+backend='inductor' raised:
+RuntimeError: Failed to find C compiler. Please specify via CC environment variable.
+```
+
+Interpretacao: este bloqueio nao e mais desalinhamento de payload. O node `WanVideoTorchCompileSettings` ativou Torch Dynamo/Inductor, e o container nao tem compilador C.
+
+Payload relevante:
+
+```text
+WanVideoTorchCompileSettings node 35
+backend=inductor
+compile_transformer_blocks_only=true
+
+WanVideoModelLoader node 22
+compile_args=["35", 0]
+```
+
+Decisao V1: nao instalar compilador nem otimizar performance agora. Para o probe minimo, desabilitar Torch compile/Inductor:
+
+- setar `TORCHDYNAMO_DISABLE=1`;
+- setar `TORCH_COMPILE_DISABLE=1`;
+- trocar `backend=inductor` por backend seguro quando possivel;
+- desligar flags de compile;
+- remover ou neutralizar o link `compile_args`.
+
+O `final_report.json` passa a incluir:
+
+```text
+wanvideo_torch_compile_policy
+wanvideo_torch_compile_sanitize_changes
+wanvideo_torch_compile_remaining_enabled_values
+```
+
+O preflight semantico passa a falhar antes do POST se ainda houver backend `inductor`, compile ligado ou link para `WanVideoTorchCompileSettings`, registrando:
+
+```text
+wanvideo_torch_compile_still_enabled
+```
+
 ## Proxima Tag Sugerida
 
 ```text
-0.1.17
+0.1.18
 ```
 
 ## Validacoes

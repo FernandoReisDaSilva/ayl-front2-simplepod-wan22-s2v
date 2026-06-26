@@ -1,6 +1,6 @@
 # Wan2.2 S2V Offline Preflight Suite V1
 
-Criado em: `2026-06-26T17:08:39.248349+00:00`
+Criado em: `2026-06-26T19:50:08.488351+00:00`
 
 ## Escopo
 
@@ -31,12 +31,14 @@ Criado em: `2026-06-26T17:08:39.248349+00:00`
 | runtime_sanitize_final | ok |
 | runtime_preflight_final | ok |
 | final_structural_literals_after_sanitize | suspicious=0 |
+| final_torch_compile_disabled_after_sanitize | errors=0 |
 
 ## FAIL Checks
 
 | check | detail |
 | --- | --- |
 | specific_wanvideo_rules_raw | errors=9 |
+| torch_compile_disabled_raw | errors=3 |
 
 ## WARN Checks
 
@@ -49,13 +51,14 @@ Criado em: `2026-06-26T17:08:39.248349+00:00`
 
 Nenhum item.
 
-## Proposed Fixes For 0.1.17
+## Proposed Fixes For 0.1.18
 
 - Keep RunPod paused until this suite shows PASS for runtime_sanitize_final, runtime_preflight_final, and final_structural_literals_after_sanitize.
 - Use sanitize_wanvideo_structural_literals to neutralize WanVideoSampler.samples=0, WanVideoAddS2VEmbeds.pose_latent=1, and any remaining WanVideo structural literal.
 - Force WanVideoSampler.batched_cfg to a real boolean when the workflow export provides -1.
+- Disable WanVideoTorchCompileSettings and remove compile_args links so Torch Dynamo/Inductor does not run without a C compiler.
 - Preserve scalar allowlist only for known scalar controls such as width, height, num_frames, seed, steps, cfg, shift, scheduler, and timing/audio scale controls.
-- When object_info becomes available locally, rerun this suite with exact ComfyUI type validation before tagging 0.1.17.
+- When object_info becomes available locally, rerun this suite with exact ComfyUI type validation before tagging 0.1.18.
 
 ## Allowlist De Literais Aceitos
 
@@ -165,6 +168,52 @@ Nenhum item.
         "old_value": 1,
         "new_value": null,
         "reason": "set invalid WanVideo structural literal to None for V1 minimum probe"
+      },
+      {
+        "node_id": "35",
+        "class_type": "WanVideoTorchCompileSettings",
+        "input_name": "backend",
+        "old_value": "inductor",
+        "new_value": "eager",
+        "reason": "disable WanVideo torch compile / inductor for V1 minimum probe"
+      },
+      {
+        "node_id": "35",
+        "class_type": "WanVideoTorchCompileSettings",
+        "input_name": "compile_transformer_blocks_only",
+        "old_value": true,
+        "new_value": false,
+        "reason": "disable WanVideo torch compile / inductor for V1 minimum probe"
+      },
+      {
+        "node_id": "22",
+        "class_type": "WanVideoModelLoader",
+        "input_name": "compile_args",
+        "old_value": [
+          "35",
+          0
+        ],
+        "new_value": null,
+        "reason": "neutralize link to WanVideoTorchCompileSettings for V1 minimum probe"
+      },
+      {
+        "node_id": "35",
+        "class_type": "WanVideoTorchCompileSettings",
+        "input_name": "__node__",
+        "old_value": {
+          "class_type": "WanVideoTorchCompileSettings",
+          "inputs": {
+            "backend": "eager",
+            "fullgraph": false,
+            "mode": "default",
+            "dynamic": false,
+            "dynamo_cache_size_limit": 64,
+            "compile_transformer_blocks_only": false,
+            "dynamo_recompile_limit": 128
+          }
+        },
+        "new_value": "<removed>",
+        "reason": "remove WanVideoTorchCompileSettings node for V1 minimum probe"
       }
     ],
     "prompt_sanitize_errors": [],
@@ -221,58 +270,5 @@ Nenhum item.
         "class_type": "WanVideoSampler",
         "input_name": "samples",
         "value": 0,
-        "value_type": "int",
-        "object_info_spec": null,
-        "reason": "wanvideo_structural_literal_error"
-      },
-      {
-        "node_id": "27",
-        "class_type": "WanVideoSampler",
-        "input_name": "feta_args",
-        "value": false,
-        "value_type": "bool",
-        "object_info_spec": null,
-        "reason": "wanvideo_structural_literal_error"
-      },
-      {
-        "node_id": "27",
-        "class_type": "WanVideoSampler",
-        "input_name": "cache_args",
-        "value": "comfy",
-        "value_type": "str",
-        "object_info_spec": null,
-        "reason": "wanvideo_structural_literal_error"
-      },
-      {
-        "node_id": "27",
-        "class_type": "WanVideoSampler",
-        "input_name": "flowedit_args",
-        "value": 0,
-        "value_type": "int",
-        "object_info_spec": null,
-        "reason": "wanvideo_structural_literal_error"
-      },
-      {
-        "node_id": "27",
-        "class_type": "WanVideoSampler",
-        "input_name": "slg_args",
-        "value": false,
-        "value_type": "bool",
-        "object_info_spec": null,
-        "reason": "wanvideo_structural_literal_error"
-      },
-      {
-        "node_id": "101",
-        "class_type": "WanVideoAddS2VEmbeds",
-        "input_name": "pose_latent",
-        "value": 1,
-        "value_type": "int",
-        "object_info_spec": null,
-        "reason": "wanvideo_structural_literal_error"
-      }
-    ],
-    "wanvideo_structural_literal_sanitize_changes": [
-      {
-        "node_id": "72",
-        
+        "value_type": "int"
 ```

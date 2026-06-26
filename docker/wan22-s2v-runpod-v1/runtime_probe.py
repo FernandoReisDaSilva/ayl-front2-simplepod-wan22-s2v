@@ -221,6 +221,9 @@ def copy_inputs_to_comfy() -> None:
 
 
 def start_comfy() -> subprocess.Popen:
+    comfy_env = os.environ.copy()
+    comfy_env["TORCHDYNAMO_DISABLE"] = "1"
+    comfy_env["TORCH_COMPILE_DISABLE"] = "1"
     command = [
         sys.executable,
         "main.py",
@@ -236,7 +239,7 @@ def start_comfy() -> subprocess.Popen:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        env=os.environ.copy(),
+        env=comfy_env,
     )
 
 
@@ -1521,6 +1524,145 @@ def sanitize_wanvideo_structural_literals(prompt: dict, object_info: dict, chang
     }
 
 
+def safe_torch_compile_backend_value(options: list):
+    for preferred in ("eager", "none", "disabled", "off", "default"):
+        if preferred in options:
+            return preferred
+    if options:
+        for option in options:
+            if "inductor" not in str(option).lower():
+                return option
+        return None
+    return "eager"
+
+
+def torch_compile_enabled_values(prompt: dict) -> list[dict]:
+    enabled = []
+    compile_node_ids = {
+        node_id
+        for node_id, node in prompt.items()
+        if str(node.get("class_type", "")) == "WanVideoTorchCompileSettings"
+    }
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        inputs = node.get("inputs", {})
+        if class_name == "WanVideoTorchCompileSettings":
+            for input_name, value in inputs.items():
+                lower_name = input_name.lower()
+                lower_value = str(value).lower() if isinstance(value, str) else ""
+                if input_name == "backend" and lower_value == "inductor":
+                    enabled.append({"node_id": node_id, "class_type": class_name, "input_name": input_name, "value": value, "reason": "inductor_backend"})
+                elif input_name in {"enabled", "compile", "use_compile", "torch_compile"} and value is True:
+                    enabled.append({"node_id": node_id, "class_type": class_name, "input_name": input_name, "value": value, "reason": "compile_enabled_boolean"})
+                elif input_name in {"fullgraph", "dynamic", "compile_transformer_blocks_only"} and value is True:
+                    enabled.append({"node_id": node_id, "class_type": class_name, "input_name": input_name, "value": value, "reason": "compile_option_enabled"})
+                elif input_name == "mode" and lower_value not in {"", "default", "none", "disabled", "off"}:
+                    enabled.append({"node_id": node_id, "class_type": class_name, "input_name": input_name, "value": value, "reason": "compile_mode_enabled"})
+        for input_name, value in inputs.items():
+            if prompt_value_is_link(value) and str(value[0]) in compile_node_ids:
+                enabled.append({"node_id": node_id, "class_type": class_name, "input_name": input_name, "value": value, "reason": "compile_settings_linked"})
+    return enabled
+
+
+def sanitize_wanvideo_torch_compile(prompt: dict, object_info: dict, changes: list[dict]) -> dict:
+    compile_changes = []
+    detected_nodes = []
+    compile_node_ids = {
+        node_id
+        for node_id, node in prompt.items()
+        if str(node.get("class_type", "")) == "WanVideoTorchCompileSettings"
+    }
+    for node_id in sorted(compile_node_ids):
+        node = prompt[node_id]
+        class_name = str(node.get("class_type", ""))
+        inputs = node.setdefault("inputs", {})
+        detected_nodes.append({"node_id": node_id, "class_type": class_name})
+        for input_name, old_value in list(inputs.items()):
+            lower_name = input_name.lower()
+            new_value = None
+            reason = "disable WanVideo torch compile / inductor for V1 minimum probe"
+            if input_name == "backend":
+                new_value = safe_torch_compile_backend_value(input_options(object_info, class_name, input_name))
+            elif input_name in {"enabled", "compile", "use_compile", "torch_compile", "fullgraph", "dynamic", "compile_transformer_blocks_only"}:
+                new_value = False
+            elif input_name == "mode":
+                options = input_options(object_info, class_name, input_name)
+                new_value = "disabled" if "disabled" in options else "default"
+            elif "compile" in lower_name and isinstance(old_value, bool):
+                new_value = False
+            if new_value is None or old_value == new_value:
+                continue
+            inputs[input_name] = new_value
+            before = len(changes)
+            prompt_sanitize_change(changes, node_id, class_name, input_name, old_value, new_value, reason)
+            if len(changes) > before:
+                compile_changes.append(changes[-1])
+
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        inputs = node.setdefault("inputs", {})
+        for input_name, old_value in list(inputs.items()):
+            if not prompt_value_is_link(old_value) or str(old_value[0]) not in compile_node_ids:
+                continue
+            before = len(changes)
+            if object_input_is_optional(object_info, class_name, input_name):
+                del inputs[input_name]
+                prompt_sanitize_change(
+                    changes,
+                    node_id,
+                    class_name,
+                    input_name,
+                    old_value,
+                    "<removed>",
+                    "remove link to WanVideoTorchCompileSettings for V1 minimum probe",
+                )
+            else:
+                inputs[input_name] = None
+                prompt_sanitize_change(
+                    changes,
+                    node_id,
+                    class_name,
+                    input_name,
+                    old_value,
+                    None,
+                    "neutralize link to WanVideoTorchCompileSettings for V1 minimum probe",
+                )
+            if len(changes) > before:
+                compile_changes.append(changes[-1])
+
+    for node_id in sorted(compile_node_ids):
+        if node_id not in prompt:
+            continue
+        old_value = prompt[node_id]
+        del prompt[node_id]
+        before = len(changes)
+        prompt_sanitize_change(
+            changes,
+            node_id,
+            "WanVideoTorchCompileSettings",
+            "__node__",
+            old_value,
+            "<removed>",
+            "remove WanVideoTorchCompileSettings node for V1 minimum probe",
+        )
+        if len(changes) > before:
+            compile_changes.append(changes[-1])
+
+    remaining = torch_compile_enabled_values(prompt)
+    if compile_changes:
+        policy = "payload_control_applied"
+    elif detected_nodes:
+        policy = "torch_compile_detected_no_change_needed"
+    else:
+        policy = "no_torch_compile_node_found"
+    return {
+        "wanvideo_torch_compile_policy": policy,
+        "wanvideo_torch_compile_detected_nodes": detected_nodes,
+        "wanvideo_torch_compile_sanitize_changes": compile_changes,
+        "wanvideo_torch_compile_remaining_enabled_values": remaining,
+    }
+
+
 def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]:
     changes: list[dict] = []
     errors: list[str] = []
@@ -1598,6 +1740,7 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
     image_resize_report = sanitize_image_resize_inputs(prompt, object_info, changes)
     wanvideo_empty_embeds_report = sanitize_wanvideo_empty_embeds_inputs(prompt, object_info, changes)
     wanvideo_structural_literal_report = sanitize_wanvideo_structural_literals(prompt, object_info, changes)
+    wanvideo_torch_compile_report = sanitize_wanvideo_torch_compile(prompt, object_info, changes)
     sageattention_report = sanitize_sageattention_inputs(prompt, object_info, changes)
     torch_precision_report = sanitize_torch_precision_inputs(prompt, object_info, changes)
     remaining_suspect_values = []
@@ -1625,6 +1768,8 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
         errors.append("Invalid WanVideoEmptyEmbeds literal values remain after sanitize.")
     if wanvideo_structural_literal_report["wanvideo_structural_literal_remaining_errors"]:
         errors.append("Invalid WanVideo structural literal values remain after sanitize.")
+    if wanvideo_torch_compile_report["wanvideo_torch_compile_remaining_enabled_values"]:
+        errors.append("WanVideo torch compile / inductor remains enabled after sanitize.")
     if torch_precision_report["torch_precision_remaining_fast_values"]:
         errors.append("Fast torch precision values remain in prompt inputs after sanitize.")
     return prompt, {
@@ -1635,6 +1780,7 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
         **image_resize_report,
         **wanvideo_empty_embeds_report,
         **wanvideo_structural_literal_report,
+        **wanvideo_torch_compile_report,
         **sageattention_report,
         **torch_precision_report,
     }
@@ -1664,6 +1810,7 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
     wanvideo_sampler_invalid_batched_cfg_values = []
     invalid_resize_combinations = []
     wanvideo_structural_literal_findings = wanvideo_structural_literal_errors(prompt, object_info)
+    wanvideo_torch_compile_enabled_values = torch_compile_enabled_values(prompt)
     fast_precision_inputs = []
     sageattention_enabled_inputs = []
     suspicious_inputs = []
@@ -1773,6 +1920,8 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
         errors.append("ImageResizeKJv2 lanczos + gpu combination remains.")
     if wanvideo_structural_literal_findings:
         errors.append("wanvideo_structural_literal_error")
+    if wanvideo_torch_compile_enabled_values:
+        errors.append("wanvideo_torch_compile_still_enabled")
     if fast_precision_inputs:
         errors.append("Fast base_precision values remain.")
     if sageattention_enabled_inputs:
@@ -1792,6 +1941,7 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
         "prompt_semantics_html_string_inputs": html_string_inputs,
         "prompt_semantics_invalid_resize_combinations": invalid_resize_combinations,
         "prompt_semantics_wanvideo_structural_literal_errors": wanvideo_structural_literal_findings,
+        "prompt_semantics_wanvideo_torch_compile_enabled_values": wanvideo_torch_compile_enabled_values,
         "prompt_semantics_fast_precision_inputs": fast_precision_inputs,
         "prompt_semantics_sageattention_enabled_inputs": sageattention_enabled_inputs,
         "prompt_semantics_suspicious_inputs": suspicious_inputs,

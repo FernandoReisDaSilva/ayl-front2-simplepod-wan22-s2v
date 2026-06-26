@@ -177,6 +177,29 @@ def local_wanvideo_structural_literal_errors(prompt: dict, object_info: dict | N
     return errors
 
 
+def local_torch_compile_errors(prompt: dict) -> list[dict]:
+    errors = []
+    compile_node_ids = {
+        node_id
+        for node_id, node in prompt.items()
+        if node.get("class_type") == "WanVideoTorchCompileSettings"
+    }
+    for node_id, node in prompt.items():
+        class_type = node.get("class_type", "")
+        inputs = node.get("inputs", {})
+        if class_type == "WanVideoTorchCompileSettings":
+            for input_name, value in inputs.items():
+                lower_value = str(value).lower() if isinstance(value, str) else ""
+                if input_name == "backend" and lower_value == "inductor":
+                    errors.append({"node_id": node_id, "class_type": class_type, "input_name": input_name, "value": value, "reason": "wanvideo_torch_compile_still_enabled"})
+                elif input_name in {"enabled", "compile", "use_compile", "torch_compile", "fullgraph", "dynamic", "compile_transformer_blocks_only"} and value is True:
+                    errors.append({"node_id": node_id, "class_type": class_type, "input_name": input_name, "value": value, "reason": "wanvideo_torch_compile_still_enabled"})
+        for input_name, value in inputs.items():
+            if prompt_value_is_link(value) and str(value[0]) in compile_node_ids:
+                errors.append({"node_id": node_id, "class_type": class_type, "input_name": input_name, "value": value, "reason": "wanvideo_torch_compile_still_enabled"})
+    return errors
+
+
 def safe_repr(value, limit: int = 220) -> str:
     text = json.dumps(value, ensure_ascii=False) if not isinstance(value, str) else value
     if len(text) <= limit:
@@ -325,7 +348,7 @@ def diagnose_prompt_inputs(prompt: dict, object_info: dict | None = None) -> dic
                 suspicious_values.append({**item, "reason": "device_string_in_non_device_input"})
 
     return {
-        "structural_errors": structural_errors + local_wanvideo_structural_literal_errors(prompt, object_info),
+        "structural_errors": structural_errors + local_wanvideo_structural_literal_errors(prompt, object_info) + local_torch_compile_errors(prompt),
         "literal_where_link_expected": literal_where_link_expected,
         "wanvideo_optional_misaligned": wanvideo_optional_misaligned,
         "s2v_embed_inputs": special_s2v_inputs,
@@ -387,12 +410,12 @@ def render_markdown(report: dict) -> str:
         f"- final_report: `{report.get('final_report_path') or 'nao encontrado'}`",
         f"- prompt_source: `{report.get('prompt_source')}`",
         "",
-        "## Estado Do Probe 0.1.16",
+        "## Estado Do Probe 0.1.17",
         "",
-        "- contexto informado: `0.1.16 passou WanVideoEmptyEmbeds e WanVideoAddS2VEmbeds`",
-        "- novo erro informado: `AttributeError: 'int' object has no attribute 'get'`",
-        "- ponto informado: `nodes_sampler.py line 720 saved_generator_state = samples.get(\"generator_state\", None)`",
-        "- interpretacao: `WanVideoSampler.samples=0 precisa ser tratado como literal estrutural proibido; batched_cfg=-1 tambem deve virar boolean`",
+        "- contexto informado: `0.1.17 chegou ao sampler real do modelo`",
+        "- novo erro informado: `torch._dynamo.exc.BackendCompilerFailed`",
+        "- ponto informado: `backend='inductor' raised RuntimeError: Failed to find C compiler`",
+        "- interpretacao: `nao e mais erro de payload; Torch Dynamo/Inductor deve ser desabilitado para o probe minimo`",
         "",
         "## Final Report Local Disponivel",
         "",
@@ -453,19 +476,18 @@ def render_markdown(report: dict) -> str:
             prompt_diag.get("wanvideo_optional_misaligned", []),
             ["node_id", "class_type", "input_name", "reason", "value"],
         ),
-        "## Fixes Propostos Para Tag 0.1.17",
+        "## Fixes Propostos Para Tag 0.1.18",
         "",
-        "1. `0.1.16` corrigiu `WanVideoAddS2VEmbeds.pose_latent=1` e outros literais estruturais.",
-        "2. O novo bloqueio confirmou `WanVideoSampler.samples=0` como literal `int` em input `LATENT`.",
-        "3. Decisao V1: tratar `samples` como input estrutural explicito, alem de `latent`, `embed`, `args`, `mask`, `image` e `audio`, preservando apenas allowlist escalar explicita.",
-        "4. Saneamento preventivo: forcar `WanVideoSampler.batched_cfg` para boolean quando o workflow exportar `-1`.",
-        "5. Manter o preflight `preflight_prompt_semantics(prompt, object_info)` antes do payload debug e antes do POST `/prompt`.",
-        "6. Rodar `temp_test_wan22_s2v_prompt_preflight_suite_v1.py` antes de qualquer nova tag RunPod.",
+        "1. `0.1.17` chegou a execucao real do sampler.",
+        "2. O novo bloqueio confirmou Torch Dynamo/Inductor ativo sem C compiler no container.",
+        "3. Decisao V1: desabilitar `WanVideoTorchCompileSettings`, remover/neutralizar links `compile_args` e setar env defensivo `TORCHDYNAMO_DISABLE=1`/`TORCH_COMPILE_DISABLE=1`.",
+        "4. Manter o preflight `preflight_prompt_semantics(prompt, object_info)` antes do payload debug e antes do POST `/prompt`.",
+        "5. Rodar `temp_test_wan22_s2v_prompt_preflight_suite_v1.py` antes de qualquer nova tag RunPod.",
         "",
         "## Proxima Tag Sugerida",
         "",
         "```text",
-        "0.1.17",
+        "0.1.18",
         "```",
         "",
         "## Observacoes",

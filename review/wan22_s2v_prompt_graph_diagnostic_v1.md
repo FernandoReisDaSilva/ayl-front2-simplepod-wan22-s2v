@@ -1,6 +1,6 @@
 # Wan2.2 S2V Prompt Graph Diagnostic V1
 
-Criado em: `2026-06-26T17:08:29.920708+00:00`
+Criado em: `2026-06-26T19:49:59.580947+00:00`
 
 ## Escopo
 
@@ -16,12 +16,12 @@ Criado em: `2026-06-26T17:08:29.920708+00:00`
 - final_report: `/Users/fernandoreisdasilva/Projects/ayl-front2-voice-character-lipsync/logs/wan22_s2v_probe_final_report_v1.json`
 - prompt_source: `payload.prompt`
 
-## Estado Do Probe 0.1.16
+## Estado Do Probe 0.1.17
 
-- contexto informado: `0.1.16 passou WanVideoEmptyEmbeds e WanVideoAddS2VEmbeds`
-- novo erro informado: `AttributeError: 'int' object has no attribute 'get'`
-- ponto informado: `nodes_sampler.py line 720 saved_generator_state = samples.get("generator_state", None)`
-- interpretacao: `WanVideoSampler.samples=0 precisa ser tratado como literal estrutural proibido; batched_cfg=-1 tambem deve virar boolean`
+- contexto informado: `0.1.17 chegou ao sampler real do modelo`
+- novo erro informado: `torch._dynamo.exc.BackendCompilerFailed`
+- ponto informado: `backend='inductor' raised RuntimeError: Failed to find C compiler`
+- interpretacao: `nao e mais erro de payload; Torch Dynamo/Inductor deve ser desabilitado para o probe minimo`
 
 ## Final Report Local Disponivel
 
@@ -32,7 +32,7 @@ Criado em: `2026-06-26T17:08:29.920708+00:00`
 ## Preflight Semantico
 
 - status: `error`
-- erros: `['Primitive literal values remain in embed inputs.', 'control_embeds contains a literal int.', 'wanvideo_empty_embeds_invalid_control_embeds', 'wanvideo_empty_embeds_invalid_extra_latents', 'wanvideo_sampler_invalid_samples_literal', 'wanvideo_sampler_invalid_batched_cfg', 'wanvideo_structural_literal_error']`
+- erros: `['Primitive literal values remain in embed inputs.', 'control_embeds contains a literal int.', 'wanvideo_empty_embeds_invalid_control_embeds', 'wanvideo_empty_embeds_invalid_extra_latents', 'wanvideo_sampler_invalid_samples_literal', 'wanvideo_sampler_invalid_batched_cfg', 'wanvideo_structural_literal_error', 'wanvideo_torch_compile_still_enabled']`
 
 ### control/embed
 
@@ -69,6 +69,9 @@ Criado em: `2026-06-26T17:08:29.920708+00:00`
 | 27 | WanVideoSampler | flowedit_args | wanvideo_structural_literal_error | 0 |
 | 27 | WanVideoSampler | slg_args | wanvideo_structural_literal_error | false |
 | 101 | WanVideoAddS2VEmbeds | pose_latent | wanvideo_structural_literal_error | 1 |
+| 22 | WanVideoModelLoader | compile_args | wanvideo_torch_compile_still_enabled | ["35", 0] |
+| 35 | WanVideoTorchCompileSettings | backend | wanvideo_torch_compile_still_enabled | inductor |
+| 35 | WanVideoTorchCompileSettings | compile_transformer_blocks_only | wanvideo_torch_compile_still_enabled | true |
 
 ### Literais Onde Link/Objeto Era Esperado
 
@@ -100,19 +103,18 @@ Nenhum item encontrado.
 
 Nenhum item encontrado.
 
-## Fixes Propostos Para Tag 0.1.17
+## Fixes Propostos Para Tag 0.1.18
 
-1. `0.1.16` corrigiu `WanVideoAddS2VEmbeds.pose_latent=1` e outros literais estruturais.
-2. O novo bloqueio confirmou `WanVideoSampler.samples=0` como literal `int` em input `LATENT`.
-3. Decisao V1: tratar `samples` como input estrutural explicito, alem de `latent`, `embed`, `args`, `mask`, `image` e `audio`, preservando apenas allowlist escalar explicita.
-4. Saneamento preventivo: forcar `WanVideoSampler.batched_cfg` para boolean quando o workflow exportar `-1`.
-5. Manter o preflight `preflight_prompt_semantics(prompt, object_info)` antes do payload debug e antes do POST `/prompt`.
-6. Rodar `temp_test_wan22_s2v_prompt_preflight_suite_v1.py` antes de qualquer nova tag RunPod.
+1. `0.1.17` chegou a execucao real do sampler.
+2. O novo bloqueio confirmou Torch Dynamo/Inductor ativo sem C compiler no container.
+3. Decisao V1: desabilitar `WanVideoTorchCompileSettings`, remover/neutralizar links `compile_args` e setar env defensivo `TORCHDYNAMO_DISABLE=1`/`TORCH_COMPILE_DISABLE=1`.
+4. Manter o preflight `preflight_prompt_semantics(prompt, object_info)` antes do payload debug e antes do POST `/prompt`.
+5. Rodar `temp_test_wan22_s2v_prompt_preflight_suite_v1.py` antes de qualquer nova tag RunPod.
 
 ## Proxima Tag Sugerida
 
 ```text
-0.1.17
+0.1.18
 ```
 
 ## Observacoes

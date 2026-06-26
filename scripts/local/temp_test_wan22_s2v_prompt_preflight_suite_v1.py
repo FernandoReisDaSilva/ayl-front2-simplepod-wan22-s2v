@@ -301,6 +301,29 @@ def corrected_rule_errors(prompt: dict) -> list[dict]:
     return errors
 
 
+def torch_compile_errors(prompt: dict) -> list[dict]:
+    errors = []
+    compile_node_ids = {
+        node_id
+        for node_id, node in prompt.items()
+        if node.get("class_type") == "WanVideoTorchCompileSettings"
+    }
+    for node_id, node in prompt.items():
+        class_type = node.get("class_type", "")
+        inputs = node.get("inputs", {})
+        if class_type == "WanVideoTorchCompileSettings":
+            for input_name, value in inputs.items():
+                lower_value = str(value).lower() if isinstance(value, str) else ""
+                if input_name == "backend" and lower_value == "inductor":
+                    errors.append({"node_id": node_id, "class_type": class_type, "input_name": input_name, "value": value, "reason": "inductor_backend"})
+                elif input_name in {"enabled", "compile", "use_compile", "torch_compile", "fullgraph", "dynamic", "compile_transformer_blocks_only"} and value is True:
+                    errors.append({"node_id": node_id, "class_type": class_type, "input_name": input_name, "value": value, "reason": "compile_enabled"})
+        for input_name, value in inputs.items():
+            if value_is_link(value) and str(value[0]) in compile_node_ids:
+                errors.append({"node_id": node_id, "class_type": class_type, "input_name": input_name, "value": value, "reason": "compile_settings_linked"})
+    return errors
+
+
 def suspicious_nodes(prompt: dict) -> list[dict]:
     items = []
     for node_id, node in prompt.items():
@@ -363,7 +386,7 @@ def render_report(report: dict) -> str:
         "## Nodes Still Suspicious",
         "",
         table(report["nodes_still_suspicious"], ["node_id", "class_type", "input_name", "value_kind", "value"]),
-        "## Proposed Fixes For 0.1.17",
+        "## Proposed Fixes For 0.1.18",
         "",
     ]
     lines.extend(f"- {item}" for item in report["proposed_fixes_0_1_16"])
@@ -412,6 +435,8 @@ def main() -> int:
     add(results, "pass" if not raw_specific_errors else "fail", "specific_wanvideo_rules_raw", f"errors={len(raw_specific_errors)}", raw_specific_errors)
     raw_corrected_errors = corrected_rule_errors(prompt)
     add(results, "pass" if not raw_corrected_errors else "fail", "previously_fixed_rules_raw", f"errors={len(raw_corrected_errors)}", raw_corrected_errors)
+    raw_torch_compile_errors = torch_compile_errors(prompt)
+    add(results, "pass" if not raw_torch_compile_errors else "fail", "torch_compile_disabled_raw", f"errors={len(raw_torch_compile_errors)}", raw_torch_compile_errors)
     if not workflow_path:
         add(results, "warn", "workflow_original_available", "workflow original not found locally")
     if not object_info:
@@ -428,13 +453,16 @@ def main() -> int:
 
     final_suspicious = suspicious_nodes(final_prompt)
     add(results, "pass" if not final_suspicious else "fail", "final_structural_literals_after_sanitize", f"suspicious={len(final_suspicious)}", final_suspicious)
+    final_torch_compile_errors = torch_compile_errors(final_prompt)
+    add(results, "pass" if not final_torch_compile_errors else "fail", "final_torch_compile_disabled_after_sanitize", f"errors={len(final_torch_compile_errors)}", final_torch_compile_errors)
 
     proposed_fixes = [
         "Keep RunPod paused until this suite shows PASS for runtime_sanitize_final, runtime_preflight_final, and final_structural_literals_after_sanitize.",
         "Use sanitize_wanvideo_structural_literals to neutralize WanVideoSampler.samples=0, WanVideoAddS2VEmbeds.pose_latent=1, and any remaining WanVideo structural literal.",
         "Force WanVideoSampler.batched_cfg to a real boolean when the workflow export provides -1.",
+        "Disable WanVideoTorchCompileSettings and remove compile_args links so Torch Dynamo/Inductor does not run without a C compiler.",
         "Preserve scalar allowlist only for known scalar controls such as width, height, num_frames, seed, steps, cfg, shift, scheduler, and timing/audio scale controls.",
-        "When object_info becomes available locally, rerun this suite with exact ComfyUI type validation before tagging 0.1.17.",
+        "When object_info becomes available locally, rerun this suite with exact ComfyUI type validation before tagging 0.1.18.",
     ]
 
     report = {
