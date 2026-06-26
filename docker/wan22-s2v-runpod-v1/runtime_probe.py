@@ -1251,12 +1251,29 @@ def sanitize_image_resize_inputs(prompt: dict, object_info: dict, changes: list[
             if len(changes) > before:
                 image_resize_changes.append(changes[-1])
 
+        if inputs.get("upscale_method") == "lanczos" and inputs.get("device") == "gpu":
+            before = len(changes)
+            inputs["device"] = "cpu"
+            prompt_sanitize_change(
+                changes,
+                node_id,
+                class_name,
+                "device",
+                "gpu",
+                "cpu",
+                "use CPU for ImageResizeKJv2 lanczos resize",
+            )
+            if len(changes) > before:
+                image_resize_changes.append(changes[-1])
+
     remaining_invalid_mask_values = []
+    remaining_invalid_combinations = []
     for node_id, node in prompt.items():
         class_name = str(node.get("class_type", ""))
         if class_name != "ImageResizeKJv2":
             continue
-        value = node.get("inputs", {}).get("mask")
+        inputs = node.get("inputs", {})
+        value = inputs.get("mask")
         if isinstance(value, str):
             remaining_invalid_mask_values.append(
                 {
@@ -1264,6 +1281,16 @@ def sanitize_image_resize_inputs(prompt: dict, object_info: dict, changes: list[
                     "class_type": class_name,
                     "input_name": "mask",
                     "value": value,
+                }
+            )
+        if inputs.get("upscale_method") == "lanczos" and inputs.get("device") == "gpu":
+            remaining_invalid_combinations.append(
+                {
+                    "node_id": node_id,
+                    "class_type": class_name,
+                    "upscale_method": inputs.get("upscale_method"),
+                    "device": inputs.get("device"),
+                    "reason": "lanczos_not_supported_on_gpu",
                 }
             )
 
@@ -1278,6 +1305,7 @@ def sanitize_image_resize_inputs(prompt: dict, object_info: dict, changes: list[
         "image_resize_detected_nodes": detected_nodes,
         "image_resize_sanitize_changes": image_resize_changes,
         "image_resize_remaining_invalid_mask_values": remaining_invalid_mask_values,
+        "image_resize_remaining_invalid_combinations": remaining_invalid_combinations,
     }
 
 
@@ -1365,6 +1393,8 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
         errors.append("HTML-like string values remain in prompt inputs after sanitize.")
     if image_resize_report["image_resize_remaining_invalid_mask_values"]:
         errors.append("Invalid ImageResizeKJv2 mask string values remain after sanitize.")
+    if image_resize_report["image_resize_remaining_invalid_combinations"]:
+        errors.append("Invalid ImageResizeKJv2 lanczos + gpu combination remains after sanitize.")
     if torch_precision_report["torch_precision_remaining_fast_values"]:
         errors.append("Fast torch precision values remain in prompt inputs after sanitize.")
     return prompt, {

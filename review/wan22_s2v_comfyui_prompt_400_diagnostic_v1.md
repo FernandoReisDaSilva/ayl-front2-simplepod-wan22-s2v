@@ -537,10 +537,38 @@ image_resize_sanitize_changes
 image_resize_remaining_invalid_mask_values
 ```
 
+## Ajuste Pos 0.1.12
+
+O probe `0.1.12` passou pelo sanitize de `mask` do `ImageResizeKJv2`.
+
+Novo bloqueio: `lanczos` nao e suportado no caminho GPU do resize.
+
+Decisao V1: manter `lanczos`, mas forcar CPU apenas nesse resize. O sanitizador de `ImageResizeKJv2` agora troca:
+
+```text
+upscale_method=lanczos
+device=gpu
+```
+
+para:
+
+```text
+upscale_method=lanczos
+device=cpu
+```
+
+O `final_report.json` passa a incluir:
+
+```text
+image_resize_remaining_invalid_combinations
+```
+
+Se ainda restar a combinacao `lanczos + gpu`, o worker falha antes do POST com `runtime_probe_status=prompt_sanitize_error`.
+
 ## Proxima Tag Sugerida
 
 ```text
-0.1.12
+0.1.13
 ```
 
 ## Validacoes
