@@ -973,6 +973,12 @@ def object_input_spec(object_info: dict, class_name: str, input_name: str):
     return None
 
 
+def object_input_is_optional(object_info: dict, class_name: str, input_name: str) -> bool:
+    class_info = object_info.get(class_name, {})
+    optional_inputs = class_info.get("input", {}).get("optional", {})
+    return isinstance(optional_inputs, dict) and input_name in optional_inputs
+
+
 def input_options(object_info: dict, class_name: str, input_name: str) -> list:
     spec = object_input_spec(object_info, class_name, input_name)
     if isinstance(spec, list) and spec and isinstance(spec[0], list):
@@ -1190,6 +1196,91 @@ def sanitize_torch_precision_inputs(prompt: dict, object_info: dict, changes: li
     }
 
 
+def sanitize_image_resize_inputs(prompt: dict, object_info: dict, changes: list[dict]) -> dict:
+    image_resize_changes = []
+    detected_nodes = []
+
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        if class_name != "ImageResizeKJv2":
+            continue
+        inputs = node.setdefault("inputs", {})
+        detected_nodes.append({"node_id": node_id, "class_type": class_name})
+
+        old_device = inputs.get("device")
+        if old_device not in {"cpu", "gpu"}:
+            inputs["device"] = "gpu"
+            before = len(changes)
+            prompt_sanitize_change(
+                changes,
+                node_id,
+                class_name,
+                "device",
+                old_device,
+                "gpu",
+                "force valid resize device",
+            )
+            if len(changes) > before:
+                image_resize_changes.append(changes[-1])
+
+        old_mask = inputs.get("mask")
+        if isinstance(old_mask, str):
+            before = len(changes)
+            if object_input_is_optional(object_info, class_name, "mask"):
+                del inputs["mask"]
+                prompt_sanitize_change(
+                    changes,
+                    node_id,
+                    class_name,
+                    "mask",
+                    old_mask,
+                    "<removed>",
+                    "remove optional mask string; ImageResizeKJv2 expects mask tensor or None",
+                )
+            else:
+                inputs["mask"] = None
+                prompt_sanitize_change(
+                    changes,
+                    node_id,
+                    class_name,
+                    "mask",
+                    old_mask,
+                    None,
+                    "set invalid mask string to None; ImageResizeKJv2 expects mask tensor or None",
+                )
+            if len(changes) > before:
+                image_resize_changes.append(changes[-1])
+
+    remaining_invalid_mask_values = []
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        if class_name != "ImageResizeKJv2":
+            continue
+        value = node.get("inputs", {}).get("mask")
+        if isinstance(value, str):
+            remaining_invalid_mask_values.append(
+                {
+                    "node_id": node_id,
+                    "class_type": class_name,
+                    "input_name": "mask",
+                    "value": value,
+                }
+            )
+
+    if image_resize_changes:
+        policy = "payload_control_applied"
+    elif detected_nodes:
+        policy = "image_resize_detected_no_change_needed"
+    else:
+        policy = "no_image_resize_node_found"
+    return {
+        "image_resize_policy": policy,
+        "image_resize_detected_nodes": detected_nodes,
+        "image_resize_sanitize_changes": image_resize_changes,
+        "image_resize_remaining_invalid_mask_values": remaining_invalid_mask_values,
+    }
+
+
 def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]:
     changes: list[dict] = []
     errors: list[str] = []
@@ -1226,11 +1317,6 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
                         new_value,
                         "disable LoRA not included in V1 minimum",
                     )
-        elif class_name == "ImageResizeKJv2":
-            old_value = inputs.get("device")
-            if old_value not in {"cpu", "gpu"}:
-                inputs["device"] = "gpu"
-                prompt_sanitize_change(changes, node_id, class_name, "device", old_value, "gpu", "force valid resize device")
         elif class_name == "WanVideoSampler":
             scheduler_options = input_options(object_info, class_name, "scheduler")
             old_scheduler = inputs.get("scheduler")
@@ -1257,6 +1343,7 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
                 "force integer riflex_freq_index after UI widget alignment",
             )
 
+    image_resize_report = sanitize_image_resize_inputs(prompt, object_info, changes)
     sageattention_report = sanitize_sageattention_inputs(prompt, object_info, changes)
     torch_precision_report = sanitize_torch_precision_inputs(prompt, object_info, changes)
     remaining_suspect_values = []
@@ -1276,6 +1363,8 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
 
     if remaining_suspect_values:
         errors.append("HTML-like string values remain in prompt inputs after sanitize.")
+    if image_resize_report["image_resize_remaining_invalid_mask_values"]:
+        errors.append("Invalid ImageResizeKJv2 mask string values remain after sanitize.")
     if torch_precision_report["torch_precision_remaining_fast_values"]:
         errors.append("Fast torch precision values remain in prompt inputs after sanitize.")
     return prompt, {
@@ -1283,6 +1372,7 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
         "prompt_sanitize_changes": changes,
         "prompt_sanitize_errors": errors,
         "prompt_sanitize_remaining_suspect_values": remaining_suspect_values,
+        **image_resize_report,
         **sageattention_report,
         **torch_precision_report,
     }

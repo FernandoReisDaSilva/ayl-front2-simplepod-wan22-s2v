@@ -499,10 +499,48 @@ Esta alteracao:
 - nao faz build/push;
 - nao baixa pesos.
 
+## Ajuste Pos 0.1.11
+
+O probe `0.1.11` passou pelo load do modelo com:
+
+- `attention_mode=sdpa`;
+- `base_precision=fp16`;
+- validacao inicial do `/prompt` aceita.
+
+Novo bloqueio em execucao no `ImageResizeKJv2` node `74`:
+
+```text
+AttributeError: 'str' object has no attribute 'shape'
+```
+
+Inputs relevantes:
+
+```text
+mask=cpu
+device=gpu
+```
+
+Diagnostico: o input `mask` ficou desalinhado e recebeu a string `cpu`. O node espera tensor de mascara ou ausencia/None.
+
+`sanitize_prompt_values(prompt, object_info)` agora aplica uma politica especifica para `ImageResizeKJv2`:
+
+- mantem `device` restrito a `gpu` ou `cpu`;
+- remove `mask` quando for string e o campo for opcional no `object_info`;
+- caso contrario, seta `mask=None`;
+- falha antes do POST se ainda restar `mask` string.
+
+O `final_report.json` passa a incluir:
+
+```text
+image_resize_policy
+image_resize_sanitize_changes
+image_resize_remaining_invalid_mask_values
+```
+
 ## Proxima Tag Sugerida
 
 ```text
-0.1.11
+0.1.12
 ```
 
 ## Validacoes
