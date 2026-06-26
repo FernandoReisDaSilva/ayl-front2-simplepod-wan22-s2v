@@ -1012,6 +1012,7 @@ SCALAR_INPUT_ALLOWLIST = {
     "noise_aug_strength",
 }
 STRUCTURAL_INPUT_NAME_TOKENS = ("latent", "latents", "embed", "embeds", "args", "mask", "image", "audio")
+STRUCTURAL_INPUT_NAMES = {"samples"}
 SCALAR_OBJECT_INFO_TYPES = {"INT", "FLOAT", "BOOLEAN", "BOOL", "STRING"}
 
 
@@ -1033,7 +1034,7 @@ def object_info_is_clear_scalar(spec) -> bool:
 
 def input_name_is_structural(input_name: str) -> bool:
     lower_name = input_name.lower()
-    return any(token in lower_name for token in STRUCTURAL_INPUT_NAME_TOKENS)
+    return lower_name in STRUCTURAL_INPUT_NAMES or any(token in lower_name for token in STRUCTURAL_INPUT_NAME_TOKENS)
 
 
 def scalar_literal_allowed(class_name: str, input_name: str, spec) -> bool:
@@ -1581,6 +1582,18 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
                 0,
                 "force integer riflex_freq_index after UI widget alignment",
             )
+            if "batched_cfg" in inputs and not isinstance(inputs.get("batched_cfg"), bool):
+                old_batched_cfg = inputs.get("batched_cfg")
+                inputs["batched_cfg"] = False
+                prompt_sanitize_change(
+                    changes,
+                    node_id,
+                    class_name,
+                    "batched_cfg",
+                    old_batched_cfg,
+                    False,
+                    "force boolean batched_cfg after UI widget alignment",
+                )
 
     image_resize_report = sanitize_image_resize_inputs(prompt, object_info, changes)
     wanvideo_empty_embeds_report = sanitize_wanvideo_empty_embeds_inputs(prompt, object_info, changes)
@@ -1647,6 +1660,8 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
     html_string_inputs = []
     wanvideo_empty_embeds_invalid_control_embeds = []
     wanvideo_empty_embeds_invalid_extra_latents = []
+    wanvideo_sampler_invalid_samples_literals = []
+    wanvideo_sampler_invalid_batched_cfg_values = []
     invalid_resize_combinations = []
     wanvideo_structural_literal_findings = wanvideo_structural_literal_errors(prompt, object_info)
     fast_precision_inputs = []
@@ -1686,6 +1701,16 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
             ):
                 wanvideo_empty_embeds_invalid_extra_latents.append(item)
                 findings.append({**item, "reason": "wanvideo_empty_embeds_invalid_extra_latents"})
+            if (
+                class_name == "WanVideoSampler"
+                and input_name == "samples"
+                and isinstance(value, (int, str, bool))
+            ):
+                wanvideo_sampler_invalid_samples_literals.append(item)
+                findings.append({**item, "reason": "wanvideo_sampler_invalid_samples_literal"})
+            if class_name == "WanVideoSampler" and input_name == "batched_cfg" and not isinstance(value, bool):
+                wanvideo_sampler_invalid_batched_cfg_values.append(item)
+                findings.append({**item, "reason": "wanvideo_sampler_invalid_batched_cfg"})
             if "mask" in lower_name and isinstance(value, str):
                 mask_string_inputs.append(item)
                 findings.append({**item, "reason": "mask_string"})
@@ -1736,6 +1761,10 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
         errors.append("wanvideo_empty_embeds_invalid_control_embeds")
     if wanvideo_empty_embeds_invalid_extra_latents:
         errors.append("wanvideo_empty_embeds_invalid_extra_latents")
+    if wanvideo_sampler_invalid_samples_literals:
+        errors.append("wanvideo_sampler_invalid_samples_literal")
+    if wanvideo_sampler_invalid_batched_cfg_values:
+        errors.append("wanvideo_sampler_invalid_batched_cfg")
     if mask_string_inputs:
         errors.append("String mask inputs remain.")
     if html_string_inputs:
@@ -1757,6 +1786,8 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
         "prompt_semantics_control_embed_literal_ints": control_embed_literal_ints,
         "prompt_semantics_wanvideo_empty_embeds_invalid_control_embeds": wanvideo_empty_embeds_invalid_control_embeds,
         "prompt_semantics_wanvideo_empty_embeds_invalid_extra_latents": wanvideo_empty_embeds_invalid_extra_latents,
+        "prompt_semantics_wanvideo_sampler_invalid_samples_literals": wanvideo_sampler_invalid_samples_literals,
+        "prompt_semantics_wanvideo_sampler_invalid_batched_cfg_values": wanvideo_sampler_invalid_batched_cfg_values,
         "prompt_semantics_mask_string_inputs": mask_string_inputs,
         "prompt_semantics_html_string_inputs": html_string_inputs,
         "prompt_semantics_invalid_resize_combinations": invalid_resize_combinations,

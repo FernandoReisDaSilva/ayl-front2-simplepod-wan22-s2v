@@ -1,6 +1,6 @@
 # Wan2.2 S2V Offline Preflight Suite V1
 
-Criado em: `2026-06-26T16:24:29.507155+00:00`
+Criado em: `2026-06-26T17:08:39.248349+00:00`
 
 ## Escopo
 
@@ -49,12 +49,13 @@ Criado em: `2026-06-26T16:24:29.507155+00:00`
 
 Nenhum item.
 
-## Proposed Fixes For 0.1.16
+## Proposed Fixes For 0.1.17
 
 - Keep RunPod paused until this suite shows PASS for runtime_sanitize_final, runtime_preflight_final, and final_structural_literals_after_sanitize.
-- Use sanitize_wanvideo_structural_literals to neutralize WanVideoAddS2VEmbeds.pose_latent=1 and any remaining WanVideo structural literal.
+- Use sanitize_wanvideo_structural_literals to neutralize WanVideoSampler.samples=0, WanVideoAddS2VEmbeds.pose_latent=1, and any remaining WanVideo structural literal.
+- Force WanVideoSampler.batched_cfg to a real boolean when the workflow export provides -1.
 - Preserve scalar allowlist only for known scalar controls such as width, height, num_frames, seed, steps, cfg, shift, scheduler, and timing/audio scale controls.
-- When object_info becomes available locally, rerun this suite with exact ComfyUI type validation before tagging 0.1.16.
+- When object_info becomes available locally, rerun this suite with exact ComfyUI type validation before tagging 0.1.17.
 
 ## Allowlist De Literais Aceitos
 
@@ -86,6 +87,14 @@ Nenhum item.
     "prompt_sanitize_status": "ok",
     "prompt_sanitize_changes": [
       {
+        "node_id": "27",
+        "class_type": "WanVideoSampler",
+        "input_name": "batched_cfg",
+        "old_value": -1,
+        "new_value": false,
+        "reason": "force boolean batched_cfg after UI widget alignment"
+      },
+      {
         "node_id": "37",
         "class_type": "WanVideoEmptyEmbeds",
         "input_name": "control_embeds",
@@ -106,6 +115,14 @@ Nenhum item.
         "class_type": "WanVideoEncode",
         "input_name": "latent_strength",
         "old_value": 1,
+        "new_value": null,
+        "reason": "set invalid WanVideo structural literal to None for V1 minimum probe"
+      },
+      {
+        "node_id": "27",
+        "class_type": "WanVideoSampler",
+        "input_name": "samples",
+        "old_value": 0,
         "new_value": null,
         "reason": "set invalid WanVideo structural literal to None for V1 minimum probe"
       },
@@ -202,6 +219,15 @@ Nenhum item.
       {
         "node_id": "27",
         "class_type": "WanVideoSampler",
+        "input_name": "samples",
+        "value": 0,
+        "value_type": "int",
+        "object_info_spec": null,
+        "reason": "wanvideo_structural_literal_error"
+      },
+      {
+        "node_id": "27",
+        "class_type": "WanVideoSampler",
         "input_name": "feta_args",
         "value": false,
         "value_type": "bool",
@@ -248,27 +274,5 @@ Nenhum item.
     "wanvideo_structural_literal_sanitize_changes": [
       {
         "node_id": "72",
-        "class_type": "WanVideoEncode",
-        "input_name": "latent_strength",
-        "old_value": 1,
-        "new_value": null,
-        "reason": "set invalid WanVideo structural literal to None for V1 minimum probe"
-      },
-      {
-        "node_id": "27",
-        "class_type": "WanVideoSampler",
-        "input_name": "feta_args",
-        "old_value": false,
-        "new_value": null,
-        "reason": "set invalid WanVideo structural literal to None for V1 minimum probe"
-      },
-      {
-        "node_id": "27",
-        "class_type": "WanVideoSampler",
-        "input_name": "cache_args",
-        "old_value": "comfy",
-        "new_value": null,
-        "reason": "set invalid WanVideo structural literal to None for V1 minimum probe"
-      },
-     
+        
 ```

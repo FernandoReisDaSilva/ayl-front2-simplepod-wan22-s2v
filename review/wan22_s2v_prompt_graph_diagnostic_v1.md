@@ -1,6 +1,6 @@
 # Wan2.2 S2V Prompt Graph Diagnostic V1
 
-Criado em: `2026-06-26T16:24:29.506859+00:00`
+Criado em: `2026-06-26T17:08:29.920708+00:00`
 
 ## Escopo
 
@@ -16,12 +16,12 @@ Criado em: `2026-06-26T16:24:29.506859+00:00`
 - final_report: `/Users/fernandoreisdasilva/Projects/ayl-front2-voice-character-lipsync/logs/wan22_s2v_probe_final_report_v1.json`
 - prompt_source: `payload.prompt`
 
-## Estado Do Probe 0.1.15
+## Estado Do Probe 0.1.16
 
-- contexto informado: `0.1.15 passou WanVideoEmptyEmbeds control_embeds e extra_latents`
-- novo erro informado: `TypeError: 'int' object is not subscriptable`
-- ponto informado: `s2v/nodes.py line 114 pose_latent["samples"]`
-- interpretacao: `WanVideoAddS2VEmbeds.pose_latent=1 e outros literais estruturais precisam de saneamento em lote`
+- contexto informado: `0.1.16 passou WanVideoEmptyEmbeds e WanVideoAddS2VEmbeds`
+- novo erro informado: `AttributeError: 'int' object has no attribute 'get'`
+- ponto informado: `nodes_sampler.py line 720 saved_generator_state = samples.get("generator_state", None)`
+- interpretacao: `WanVideoSampler.samples=0 precisa ser tratado como literal estrutural proibido; batched_cfg=-1 tambem deve virar boolean`
 
 ## Final Report Local Disponivel
 
@@ -32,7 +32,7 @@ Criado em: `2026-06-26T16:24:29.506859+00:00`
 ## Preflight Semantico
 
 - status: `error`
-- erros: `['Primitive literal values remain in embed inputs.', 'control_embeds contains a literal int.', 'wanvideo_empty_embeds_invalid_control_embeds', 'wanvideo_empty_embeds_invalid_extra_latents', 'wanvideo_structural_literal_error']`
+- erros: `['Primitive literal values remain in embed inputs.', 'control_embeds contains a literal int.', 'wanvideo_empty_embeds_invalid_control_embeds', 'wanvideo_empty_embeds_invalid_extra_latents', 'wanvideo_sampler_invalid_samples_literal', 'wanvideo_sampler_invalid_batched_cfg', 'wanvideo_structural_literal_error']`
 
 ### control/embed
 
@@ -59,9 +59,11 @@ Criado em: `2026-06-26T16:24:29.506859+00:00`
 | --- | --- | --- | --- | --- |
 | 37 | WanVideoEmptyEmbeds | control_embeds | wanvideo_empty_embeds_invalid_control_embeds | 832 |
 | 37 | WanVideoEmptyEmbeds | extra_latents | wanvideo_empty_embeds_invalid_extra_latents | 480 |
+| 27 | WanVideoSampler | batched_cfg | wanvideo_sampler_invalid_batched_cfg | -1 |
 | 72 | WanVideoEncode | latent_strength | wanvideo_structural_literal_error | 1 |
 | 37 | WanVideoEmptyEmbeds | control_embeds | wanvideo_structural_literal_error | 832 |
 | 37 | WanVideoEmptyEmbeds | extra_latents | wanvideo_structural_literal_error | 480 |
+| 27 | WanVideoSampler | samples | wanvideo_structural_literal_error | 0 |
 | 27 | WanVideoSampler | feta_args | wanvideo_structural_literal_error | false |
 | 27 | WanVideoSampler | cache_args | wanvideo_structural_literal_error | comfy |
 | 27 | WanVideoSampler | flowedit_args | wanvideo_structural_literal_error | 0 |
@@ -98,18 +100,19 @@ Nenhum item encontrado.
 
 Nenhum item encontrado.
 
-## Fixes Propostos Para Tag 0.1.16
+## Fixes Propostos Para Tag 0.1.17
 
-1. `0.1.15` corrigiu `control_embeds=832` e `extra_latents=480` no `WanVideoEmptyEmbeds` node `37`.
-2. O novo bloqueio confirmou `WanVideoAddS2VEmbeds.pose_latent=1` como literal `int`.
-3. Decisao V1: sanitizar genericamente literais estruturais em `WanVideo*` quando o input parecer `latent`, `embed`, `args`, `mask`, `image` ou `audio`, preservando apenas allowlist escalar explicita.
-4. Manter o preflight `preflight_prompt_semantics(prompt, object_info)` antes do payload debug e antes do POST `/prompt`.
-5. Rodar `temp_test_wan22_s2v_prompt_preflight_suite_v1.py` antes de qualquer nova tag RunPod.
+1. `0.1.16` corrigiu `WanVideoAddS2VEmbeds.pose_latent=1` e outros literais estruturais.
+2. O novo bloqueio confirmou `WanVideoSampler.samples=0` como literal `int` em input `LATENT`.
+3. Decisao V1: tratar `samples` como input estrutural explicito, alem de `latent`, `embed`, `args`, `mask`, `image` e `audio`, preservando apenas allowlist escalar explicita.
+4. Saneamento preventivo: forcar `WanVideoSampler.batched_cfg` para boolean quando o workflow exportar `-1`.
+5. Manter o preflight `preflight_prompt_semantics(prompt, object_info)` antes do payload debug e antes do POST `/prompt`.
+6. Rodar `temp_test_wan22_s2v_prompt_preflight_suite_v1.py` antes de qualquer nova tag RunPod.
 
 ## Proxima Tag Sugerida
 
 ```text
-0.1.16
+0.1.17
 ```
 
 ## Observacoes

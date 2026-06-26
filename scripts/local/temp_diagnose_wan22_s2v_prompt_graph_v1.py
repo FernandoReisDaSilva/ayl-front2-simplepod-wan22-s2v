@@ -33,6 +33,7 @@ EMBED_INPUT_NAMES = {
     "clip_embeds",
 }
 STRUCTURAL_INPUT_NAME_TOKENS = ("latent", "latents", "embed", "embeds", "args", "mask", "image", "audio")
+STRUCTURAL_INPUT_NAMES = {"samples"}
 SCALAR_INPUT_ALLOWLIST = {
     "width",
     "height",
@@ -136,7 +137,7 @@ def prompt_value_is_literal(value) -> bool:
 
 def input_name_is_structural(input_name: str) -> bool:
     lower_name = input_name.lower()
-    return any(token in lower_name for token in STRUCTURAL_INPUT_NAME_TOKENS)
+    return lower_name in STRUCTURAL_INPUT_NAMES or any(token in lower_name for token in STRUCTURAL_INPUT_NAME_TOKENS)
 
 
 def local_wanvideo_structural_literal_errors(prompt: dict, object_info: dict | None = None) -> list[dict]:
@@ -281,6 +282,13 @@ def diagnose_prompt_inputs(prompt: dict, object_info: dict | None = None) -> dic
                         "reason": f"wanvideo_empty_embeds_invalid_{input_name}",
                     }
                 )
+            if class_type == "WanVideoSampler" and input_name == "batched_cfg" and not isinstance(value, bool):
+                structural_errors.append(
+                    {
+                        **item,
+                        "reason": "wanvideo_sampler_invalid_batched_cfg",
+                    }
+                )
             expects_link = any(token in lower_name for token in ("embed", "image", "audio", "mask", "latent", "model"))
             if expects_link and prompt_value_is_literal(value):
                 literal_where_link_expected.append({**item, "reason": "literal_in_link_or_object_like_input"})
@@ -379,12 +387,12 @@ def render_markdown(report: dict) -> str:
         f"- final_report: `{report.get('final_report_path') or 'nao encontrado'}`",
         f"- prompt_source: `{report.get('prompt_source')}`",
         "",
-        "## Estado Do Probe 0.1.15",
+        "## Estado Do Probe 0.1.16",
         "",
-        "- contexto informado: `0.1.15 passou WanVideoEmptyEmbeds control_embeds e extra_latents`",
-        "- novo erro informado: `TypeError: 'int' object is not subscriptable`",
-        "- ponto informado: `s2v/nodes.py line 114 pose_latent[\"samples\"]`",
-        "- interpretacao: `WanVideoAddS2VEmbeds.pose_latent=1 e outros literais estruturais precisam de saneamento em lote`",
+        "- contexto informado: `0.1.16 passou WanVideoEmptyEmbeds e WanVideoAddS2VEmbeds`",
+        "- novo erro informado: `AttributeError: 'int' object has no attribute 'get'`",
+        "- ponto informado: `nodes_sampler.py line 720 saved_generator_state = samples.get(\"generator_state\", None)`",
+        "- interpretacao: `WanVideoSampler.samples=0 precisa ser tratado como literal estrutural proibido; batched_cfg=-1 tambem deve virar boolean`",
         "",
         "## Final Report Local Disponivel",
         "",
@@ -445,18 +453,19 @@ def render_markdown(report: dict) -> str:
             prompt_diag.get("wanvideo_optional_misaligned", []),
             ["node_id", "class_type", "input_name", "reason", "value"],
         ),
-        "## Fixes Propostos Para Tag 0.1.16",
+        "## Fixes Propostos Para Tag 0.1.17",
         "",
-        "1. `0.1.15` corrigiu `control_embeds=832` e `extra_latents=480` no `WanVideoEmptyEmbeds` node `37`.",
-        "2. O novo bloqueio confirmou `WanVideoAddS2VEmbeds.pose_latent=1` como literal `int`.",
-        "3. Decisao V1: sanitizar genericamente literais estruturais em `WanVideo*` quando o input parecer `latent`, `embed`, `args`, `mask`, `image` ou `audio`, preservando apenas allowlist escalar explicita.",
-        "4. Manter o preflight `preflight_prompt_semantics(prompt, object_info)` antes do payload debug e antes do POST `/prompt`.",
-        "5. Rodar `temp_test_wan22_s2v_prompt_preflight_suite_v1.py` antes de qualquer nova tag RunPod.",
+        "1. `0.1.16` corrigiu `WanVideoAddS2VEmbeds.pose_latent=1` e outros literais estruturais.",
+        "2. O novo bloqueio confirmou `WanVideoSampler.samples=0` como literal `int` em input `LATENT`.",
+        "3. Decisao V1: tratar `samples` como input estrutural explicito, alem de `latent`, `embed`, `args`, `mask`, `image` e `audio`, preservando apenas allowlist escalar explicita.",
+        "4. Saneamento preventivo: forcar `WanVideoSampler.batched_cfg` para boolean quando o workflow exportar `-1`.",
+        "5. Manter o preflight `preflight_prompt_semantics(prompt, object_info)` antes do payload debug e antes do POST `/prompt`.",
+        "6. Rodar `temp_test_wan22_s2v_prompt_preflight_suite_v1.py` antes de qualquer nova tag RunPod.",
         "",
         "## Proxima Tag Sugerida",
         "",
         "```text",
-        "0.1.16",
+        "0.1.17",
         "```",
         "",
         "## Observacoes",

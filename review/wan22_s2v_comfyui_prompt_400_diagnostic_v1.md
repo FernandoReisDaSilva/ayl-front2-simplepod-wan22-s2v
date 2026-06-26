@@ -691,10 +691,51 @@ gera:
 review/wan22_s2v_offline_preflight_suite_v1.md
 ```
 
+## Ajuste Pos 0.1.16
+
+O probe `0.1.16` passou pelos bloqueios anteriores:
+
+- `WanVideoEmptyEmbeds.control_embeds`;
+- `WanVideoEmptyEmbeds.extra_latents`;
+- `WanVideoAddS2VEmbeds.pose_latent`;
+- literais estruturais em args do sampler.
+
+Novo bloqueio no `WanVideoSampler` node `27`:
+
+```text
+AttributeError: 'int' object has no attribute 'get'
+```
+
+Ponto observado:
+
+```text
+nodes_sampler.py line 720
+saved_generator_state = samples.get("generator_state", None)
+```
+
+Input relevante:
+
+```text
+WanVideoSampler.samples=0
+object_info_spec=["LATENT"]
+```
+
+Diagnostico: `samples` nao contem tokens como `latent` ou `embed`, mas semanticamente e um input estrutural `LATENT`. Portanto deve entrar explicitamente na regra generica.
+
+Decisao V1: `WanVideoSampler.samples` nao pode ser `int`, `str` ou `bool`. Para o probe minimo, remover se opcional no `object_info`; caso contrario, setar `None`. Se o proximo erro indicar que ComfyUI exige link `LATENT`, a proxima rodada deve religar `samples` ao output correto de `WanVideoAddS2VEmbeds`/`WanVideoEmptyEmbeds`.
+
+O preflight semantico passa a registrar:
+
+```text
+wanvideo_sampler_invalid_samples_literal
+```
+
+Saneamento preventivo adicional: o payload bruto tambem mostra `WanVideoSampler.batched_cfg=-1`. Como esse campo deve ser booleano, o sanitizer passa a forcar `False` quando o valor nao for `bool`, e o preflight registra `wanvideo_sampler_invalid_batched_cfg` se escapar.
+
 ## Proxima Tag Sugerida
 
 ```text
-0.1.16
+0.1.17
 ```
 
 ## Validacoes

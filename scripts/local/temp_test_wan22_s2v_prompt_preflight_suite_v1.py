@@ -310,7 +310,7 @@ def suspicious_nodes(prompt: dict) -> list[dict]:
             lower = input_name.lower()
             if key in ACCEPTED_LITERAL_ALLOWLIST:
                 continue
-            if ("latent" in lower or "embed" in lower or "args" in lower) and isinstance(value, (int, str, bool)):
+            if ("latent" in lower or "embed" in lower or "args" in lower or lower == "samples") and isinstance(value, (int, str, bool)):
                 items.append({"node_id": node_id, "class_type": class_type, "input_name": input_name, "value": value, "value_kind": value_kind(value)})
     return items
 
@@ -363,7 +363,7 @@ def render_report(report: dict) -> str:
         "## Nodes Still Suspicious",
         "",
         table(report["nodes_still_suspicious"], ["node_id", "class_type", "input_name", "value_kind", "value"]),
-        "## Proposed Fixes For 0.1.16",
+        "## Proposed Fixes For 0.1.17",
         "",
     ]
     lines.extend(f"- {item}" for item in report["proposed_fixes_0_1_16"])
@@ -431,9 +431,10 @@ def main() -> int:
 
     proposed_fixes = [
         "Keep RunPod paused until this suite shows PASS for runtime_sanitize_final, runtime_preflight_final, and final_structural_literals_after_sanitize.",
-        "Use sanitize_wanvideo_structural_literals to neutralize WanVideoAddS2VEmbeds.pose_latent=1 and any remaining WanVideo structural literal.",
+        "Use sanitize_wanvideo_structural_literals to neutralize WanVideoSampler.samples=0, WanVideoAddS2VEmbeds.pose_latent=1, and any remaining WanVideo structural literal.",
+        "Force WanVideoSampler.batched_cfg to a real boolean when the workflow export provides -1.",
         "Preserve scalar allowlist only for known scalar controls such as width, height, num_frames, seed, steps, cfg, shift, scheduler, and timing/audio scale controls.",
-        "When object_info becomes available locally, rerun this suite with exact ComfyUI type validation before tagging 0.1.16.",
+        "When object_info becomes available locally, rerun this suite with exact ComfyUI type validation before tagging 0.1.17.",
     ]
 
     report = {
