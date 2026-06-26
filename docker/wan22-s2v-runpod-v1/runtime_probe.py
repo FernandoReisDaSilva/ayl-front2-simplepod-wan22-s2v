@@ -1312,6 +1312,7 @@ def sanitize_image_resize_inputs(prompt: dict, object_info: dict, changes: list[
 def sanitize_wanvideo_empty_embeds_inputs(prompt: dict, object_info: dict, changes: list[dict]) -> dict:
     empty_embeds_changes = []
     detected_nodes = []
+    invalid_literal_inputs = ("control_embeds", "extra_latents")
 
     for node_id, node in prompt.items():
         class_name = str(node.get("class_type", ""))
@@ -1320,54 +1321,57 @@ def sanitize_wanvideo_empty_embeds_inputs(prompt: dict, object_info: dict, chang
         inputs = node.setdefault("inputs", {})
         detected_nodes.append({"node_id": node_id, "class_type": class_name})
 
-        if "control_embeds" not in inputs:
-            continue
-        old_value = inputs.get("control_embeds")
-        if not isinstance(old_value, (int, str, bool)):
-            continue
+        for input_name in invalid_literal_inputs:
+            if input_name not in inputs:
+                continue
+            old_value = inputs.get(input_name)
+            if not isinstance(old_value, (int, str, bool)):
+                continue
 
-        before = len(changes)
-        if object_input_is_optional(object_info, class_name, "control_embeds"):
-            del inputs["control_embeds"]
-            prompt_sanitize_change(
-                changes,
-                node_id,
-                class_name,
-                "control_embeds",
-                old_value,
-                "<removed>",
-                "remove invalid literal control_embeds for V1 minimum probe",
-            )
-        else:
-            inputs["control_embeds"] = None
-            prompt_sanitize_change(
-                changes,
-                node_id,
-                class_name,
-                "control_embeds",
-                old_value,
-                None,
-                "set invalid literal control_embeds to None for V1 minimum probe",
-            )
-        if len(changes) > before:
-            empty_embeds_changes.append(changes[-1])
+            before = len(changes)
+            if object_input_is_optional(object_info, class_name, input_name):
+                del inputs[input_name]
+                prompt_sanitize_change(
+                    changes,
+                    node_id,
+                    class_name,
+                    input_name,
+                    old_value,
+                    "<removed>",
+                    f"remove invalid literal {input_name} for V1 minimum probe",
+                )
+            else:
+                inputs[input_name] = None
+                prompt_sanitize_change(
+                    changes,
+                    node_id,
+                    class_name,
+                    input_name,
+                    old_value,
+                    None,
+                    f"set invalid literal {input_name} to None for V1 minimum probe",
+                )
+            if len(changes) > before:
+                empty_embeds_changes.append(changes[-1])
 
     remaining_invalid_values = []
     for node_id, node in prompt.items():
         class_name = str(node.get("class_type", ""))
         if class_name != "WanVideoEmptyEmbeds":
             continue
-        value = node.get("inputs", {}).get("control_embeds")
-        if isinstance(value, (int, str, bool)):
-            remaining_invalid_values.append(
-                {
-                    "node_id": node_id,
-                    "class_type": class_name,
-                    "input_name": "control_embeds",
-                    "value": value,
-                    "reason": "wanvideo_empty_embeds_invalid_control_embeds",
-                }
-            )
+        inputs = node.get("inputs", {})
+        for input_name in invalid_literal_inputs:
+            value = inputs.get(input_name)
+            if isinstance(value, (int, str, bool)):
+                remaining_invalid_values.append(
+                    {
+                        "node_id": node_id,
+                        "class_type": class_name,
+                        "input_name": input_name,
+                        "value": value,
+                        "reason": f"wanvideo_empty_embeds_invalid_{input_name}",
+                    }
+                )
 
     if empty_embeds_changes:
         policy = "payload_control_applied"
@@ -1471,7 +1475,7 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
     if image_resize_report["image_resize_remaining_invalid_combinations"]:
         errors.append("Invalid ImageResizeKJv2 lanczos + gpu combination remains after sanitize.")
     if wanvideo_empty_embeds_report["wanvideo_empty_embeds_remaining_invalid_values"]:
-        errors.append("Invalid WanVideoEmptyEmbeds control_embeds literal values remain after sanitize.")
+        errors.append("Invalid WanVideoEmptyEmbeds literal values remain after sanitize.")
     if torch_precision_report["torch_precision_remaining_fast_values"]:
         errors.append("Fast torch precision values remain in prompt inputs after sanitize.")
     return prompt, {
@@ -1505,6 +1509,7 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
     mask_string_inputs = []
     html_string_inputs = []
     wanvideo_empty_embeds_invalid_control_embeds = []
+    wanvideo_empty_embeds_invalid_extra_latents = []
     invalid_resize_combinations = []
     fast_precision_inputs = []
     sageattention_enabled_inputs = []
@@ -1536,6 +1541,13 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
             ):
                 wanvideo_empty_embeds_invalid_control_embeds.append(item)
                 findings.append({**item, "reason": "wanvideo_empty_embeds_invalid_control_embeds"})
+            if (
+                class_name == "WanVideoEmptyEmbeds"
+                and input_name == "extra_latents"
+                and isinstance(value, (int, str, bool))
+            ):
+                wanvideo_empty_embeds_invalid_extra_latents.append(item)
+                findings.append({**item, "reason": "wanvideo_empty_embeds_invalid_extra_latents"})
             if "mask" in lower_name and isinstance(value, str):
                 mask_string_inputs.append(item)
                 findings.append({**item, "reason": "mask_string"})
@@ -1584,6 +1596,8 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
         errors.append("control_embeds contains a literal int.")
     if wanvideo_empty_embeds_invalid_control_embeds:
         errors.append("wanvideo_empty_embeds_invalid_control_embeds")
+    if wanvideo_empty_embeds_invalid_extra_latents:
+        errors.append("wanvideo_empty_embeds_invalid_extra_latents")
     if mask_string_inputs:
         errors.append("String mask inputs remain.")
     if html_string_inputs:
@@ -1602,6 +1616,7 @@ def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
         "prompt_semantics_primitive_embed_inputs": primitive_embed_inputs,
         "prompt_semantics_control_embed_literal_ints": control_embed_literal_ints,
         "prompt_semantics_wanvideo_empty_embeds_invalid_control_embeds": wanvideo_empty_embeds_invalid_control_embeds,
+        "prompt_semantics_wanvideo_empty_embeds_invalid_extra_latents": wanvideo_empty_embeds_invalid_extra_latents,
         "prompt_semantics_mask_string_inputs": mask_string_inputs,
         "prompt_semantics_html_string_inputs": html_string_inputs,
         "prompt_semantics_invalid_resize_combinations": invalid_resize_combinations,

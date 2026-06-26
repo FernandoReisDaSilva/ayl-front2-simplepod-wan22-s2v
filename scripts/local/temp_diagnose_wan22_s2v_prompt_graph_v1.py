@@ -186,6 +186,7 @@ def prompt_primitive_link_diagnostics(prompt: dict) -> list[dict]:
 
 def diagnose_prompt_inputs(prompt: dict, object_info: dict | None = None) -> dict:
     object_info = object_info or {}
+    structural_errors = []
     literal_where_link_expected = []
     wanvideo_optional_misaligned = []
     special_s2v_inputs = []
@@ -203,6 +204,17 @@ def diagnose_prompt_inputs(prompt: dict, object_info: dict | None = None) -> dic
                 "value": value,
                 **value_preview(value),
             }
+            if (
+                class_type == "WanVideoEmptyEmbeds"
+                and input_name in {"control_embeds", "extra_latents"}
+                and isinstance(value, (int, str, bool))
+            ):
+                structural_errors.append(
+                    {
+                        **item,
+                        "reason": f"wanvideo_empty_embeds_invalid_{input_name}",
+                    }
+                )
             expects_link = any(token in lower_name for token in ("embed", "image", "audio", "mask", "latent", "model"))
             if expects_link and prompt_value_is_literal(value):
                 literal_where_link_expected.append({**item, "reason": "literal_in_link_or_object_like_input"})
@@ -239,6 +251,7 @@ def diagnose_prompt_inputs(prompt: dict, object_info: dict | None = None) -> dic
                 suspicious_values.append({**item, "reason": "device_string_in_non_device_input"})
 
     return {
+        "structural_errors": structural_errors,
         "literal_where_link_expected": literal_where_link_expected,
         "wanvideo_optional_misaligned": wanvideo_optional_misaligned,
         "s2v_embed_inputs": special_s2v_inputs,
@@ -336,6 +349,12 @@ def render_markdown(report: dict) -> str:
             prompt_diag.get("suspicious_values", []),
             ["node_id", "class_type", "input_name", "reason", "value"],
         ),
+        "### Erros Estruturais",
+        "",
+        format_table(
+            prompt_diag.get("structural_errors", []),
+            ["node_id", "class_type", "input_name", "reason", "value"],
+        ),
         "### Literais Onde Link/Objeto Era Esperado",
         "",
         format_table(
@@ -360,18 +379,18 @@ def render_markdown(report: dict) -> str:
             prompt_diag.get("wanvideo_optional_misaligned", []),
             ["node_id", "class_type", "input_name", "reason", "value"],
         ),
-        "## Fixes Propostos Para Tag 0.1.14",
+        "## Fixes Propostos Para Tag 0.1.15",
         "",
-        "1. `0.1.13` passou pelos ajustes de `ImageResizeKJv2` e chegou ao bloqueio de embed.",
-        "2. O payload real confirmou `WanVideoEmptyEmbeds` node `37` com `control_embeds=832` como literal `int`.",
-        "3. Decisao V1: no probe minimo, remover `control_embeds` quando o input for opcional; caso contrario, setar `None`.",
+        "1. `0.1.14` corrigiu `control_embeds=832` no `WanVideoEmptyEmbeds` node `37`.",
+        "2. O novo bloqueio confirmou `extra_latents=480` como literal `int` no mesmo node.",
+        "3. Decisao V1: no probe minimo, remover `control_embeds` e `extra_latents` quando o input for opcional; caso contrario, setar `None`.",
         "4. Manter o preflight `preflight_prompt_semantics(prompt, object_info)` antes do payload debug e antes do POST `/prompt`.",
-        "5. Falhar localmente quando encontrar `WanVideoEmptyEmbeds.control_embeds` como `int`, `str` ou `bool`, alem dos bloqueios ja existentes para `mask` string, HTML string, `lanczos+gpu`, `base_precision` fast ou `attention_mode` sage.",
+        "5. Falhar localmente quando encontrar `WanVideoEmptyEmbeds.control_embeds` ou `WanVideoEmptyEmbeds.extra_latents` como `int`, `str` ou `bool`, alem dos bloqueios ja existentes para `mask` string, HTML string, `lanczos+gpu`, `base_precision` fast ou `attention_mode` sage.",
         "",
         "## Proxima Tag Sugerida",
         "",
         "```text",
-        "0.1.14",
+        "0.1.15",
         "```",
         "",
         "## Observacoes",

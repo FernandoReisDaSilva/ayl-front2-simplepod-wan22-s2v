@@ -606,10 +606,47 @@ O preflight semantico tambem falha antes do POST se ainda existir `WanVideoEmpty
 wanvideo_empty_embeds_invalid_control_embeds
 ```
 
+## Ajuste Pos 0.1.14
+
+O probe `0.1.14` corrigiu `WanVideoEmptyEmbeds.control_embeds=832`: o valor literal foi neutralizado corretamente.
+
+Novo bloqueio no mesmo node:
+
+```text
+TypeError: 'int' object is not subscriptable
+```
+
+Ponto observado:
+
+```text
+ComfyUI-WanVideoWrapper/nodes.py line 1442
+"samples": extra_latents["samples"]
+```
+
+Inputs relevantes:
+
+```text
+WanVideoEmptyEmbeds node 37
+width=960
+height=640
+num_frames=81
+extra_latents=480
+```
+
+Diagnostico: `extra_latents` tambem ficou como literal `int`, mas o node espera objeto/dict de latents ou ausencia/None.
+
+Decisao V1: para o probe minimo, `WanVideoEmptyEmbeds.extra_latents` deve seguir a mesma politica de `control_embeds`: remover quando opcional no `object_info`; caso contrario, setar `None`.
+
+O preflight semantico tambem passa a falhar antes do POST se ainda existir `WanVideoEmptyEmbeds.extra_latents` como `int`, `str` ou `bool`, registrando:
+
+```text
+wanvideo_empty_embeds_invalid_extra_latents
+```
+
 ## Proxima Tag Sugerida
 
 ```text
-0.1.14
+0.1.15
 ```
 
 ## Validacoes

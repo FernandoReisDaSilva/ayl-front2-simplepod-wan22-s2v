@@ -1,6 +1,6 @@
 # Wan2.2 S2V Prompt Graph Diagnostic V1
 
-Criado em: `2026-06-26T12:49:12.924121+00:00`
+Criado em: `2026-06-26T13:35:18.866820+00:00`
 
 ## Escopo
 
@@ -32,7 +32,7 @@ Criado em: `2026-06-26T12:49:12.924121+00:00`
 ## Preflight Semantico
 
 - status: `error`
-- erros: `['Primitive literal values remain in embed inputs.', 'control_embeds contains a literal int.', 'wanvideo_empty_embeds_invalid_control_embeds']`
+- erros: `['Primitive literal values remain in embed inputs.', 'control_embeds contains a literal int.', 'wanvideo_empty_embeds_invalid_control_embeds', 'wanvideo_empty_embeds_invalid_extra_latents']`
 
 ### control/embed
 
@@ -52,6 +52,13 @@ Criado em: `2026-06-26T12:49:12.924121+00:00`
 | node_id | class_type | input_name | reason | value |
 | --- | --- | --- | --- | --- |
 | 37 | WanVideoEmptyEmbeds | control_embeds | int_in_embed_dict_or_control_input | 832 |
+
+### Erros Estruturais
+
+| node_id | class_type | input_name | reason | value |
+| --- | --- | --- | --- | --- |
+| 37 | WanVideoEmptyEmbeds | control_embeds | wanvideo_empty_embeds_invalid_control_embeds | 832 |
+| 37 | WanVideoEmptyEmbeds | extra_latents | wanvideo_empty_embeds_invalid_extra_latents | 480 |
 
 ### Literais Onde Link/Objeto Era Esperado
 
@@ -83,18 +90,18 @@ Nenhum item encontrado.
 
 Nenhum item encontrado.
 
-## Fixes Propostos Para Tag 0.1.14
+## Fixes Propostos Para Tag 0.1.15
 
-1. `0.1.13` passou pelos ajustes de `ImageResizeKJv2` e chegou ao bloqueio de embed.
-2. O payload real confirmou `WanVideoEmptyEmbeds` node `37` com `control_embeds=832` como literal `int`.
-3. Decisao V1: no probe minimo, remover `control_embeds` quando o input for opcional; caso contrario, setar `None`.
+1. `0.1.14` corrigiu `control_embeds=832` no `WanVideoEmptyEmbeds` node `37`.
+2. O novo bloqueio confirmou `extra_latents=480` como literal `int` no mesmo node.
+3. Decisao V1: no probe minimo, remover `control_embeds` e `extra_latents` quando o input for opcional; caso contrario, setar `None`.
 4. Manter o preflight `preflight_prompt_semantics(prompt, object_info)` antes do payload debug e antes do POST `/prompt`.
-5. Falhar localmente quando encontrar `WanVideoEmptyEmbeds.control_embeds` como `int`, `str` ou `bool`, alem dos bloqueios ja existentes para `mask` string, HTML string, `lanczos+gpu`, `base_precision` fast ou `attention_mode` sage.
+5. Falhar localmente quando encontrar `WanVideoEmptyEmbeds.control_embeds` ou `WanVideoEmptyEmbeds.extra_latents` como `int`, `str` ou `bool`, alem dos bloqueios ja existentes para `mask` string, HTML string, `lanczos+gpu`, `base_precision` fast ou `attention_mode` sage.
 
 ## Proxima Tag Sugerida
 
 ```text
-0.1.14
+0.1.15
 ```
 
 ## Observacoes
