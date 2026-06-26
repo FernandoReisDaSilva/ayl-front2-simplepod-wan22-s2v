@@ -565,10 +565,51 @@ image_resize_remaining_invalid_combinations
 
 Se ainda restar a combinacao `lanczos + gpu`, o worker falha antes do POST com `runtime_probe_status=prompt_sanitize_error`.
 
+## Ajuste Pos 0.1.13
+
+O probe `0.1.13` passou pelos ajustes de `ImageResizeKJv2`, incluindo `mask` invalida e `lanczos` em CPU.
+
+Novo bloqueio em execucao:
+
+```text
+TypeError: 'int' object is not subscriptable
+```
+
+Ponto observado:
+
+```text
+ComfyUI-WanVideoWrapper/nodes.py line 1438
+control_embeds["control_embeds"]
+```
+
+O diagnostico offline com o payload real confirmou:
+
+```text
+WanVideoEmptyEmbeds node 37
+control_embeds=832
+tipo=int literal
+```
+
+Decisao V1: para o probe minimo, `WanVideoEmptyEmbeds.control_embeds` nao deve carregar literal primitivo. O sanitizador agora remove `control_embeds` quando o input for opcional no `object_info`; caso contrario, seta `None`.
+
+O `final_report.json` passa a incluir:
+
+```text
+wanvideo_empty_embeds_policy
+wanvideo_empty_embeds_sanitize_changes
+wanvideo_empty_embeds_remaining_invalid_values
+```
+
+O preflight semantico tambem falha antes do POST se ainda existir `WanVideoEmptyEmbeds.control_embeds` como `int`, `str` ou `bool`, registrando:
+
+```text
+wanvideo_empty_embeds_invalid_control_embeds
+```
+
 ## Proxima Tag Sugerida
 
 ```text
-0.1.13
+0.1.14
 ```
 
 ## Validacoes

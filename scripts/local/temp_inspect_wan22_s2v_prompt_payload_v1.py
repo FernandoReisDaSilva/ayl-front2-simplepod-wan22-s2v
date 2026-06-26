@@ -6,7 +6,12 @@ from pathlib import Path
 
 TEST_ID = "TEST_LOCAL_WAN22_S2V_PROMPT_PAYLOAD_INSPECT_V1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LOG_PATH = REPO_ROOT / "logs" / "wan22_s2v_prompt_payload_local_debug_v1.json"
+LOG_PATH = REPO_ROOT / "logs" / "wan22_s2v_prompt_payload_inspect_v1_log.json"
+PAYLOAD_CANDIDATES = (
+    REPO_ROOT / "logs" / "wan22_s2v_prompt_payload_local_debug_v1.json",
+    REPO_ROOT / "logs" / "wan22_s2v_prompt_payload_debug_v1.json",
+    REPO_ROOT / "logs" / "wan22_s2v_prompt_payload_debug.json",
+)
 WORKFLOW_CANDIDATES = (
     REPO_ROOT / "docker" / "wan22-s2v-runpod-v1" / "wanvideo2_2_S2V_context_window_testing.json",
     REPO_ROOT / "docker" / "wan22-s2v-runpod-v1" / "workflows" / "wanvideo2_2_S2V_context_window_testing.json",
@@ -47,6 +52,85 @@ def resolve_workflow_path(raw_path: str) -> Path | None:
 
 def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def looks_like_api_prompt(value) -> bool:
+    if not isinstance(value, dict) or not value:
+        return False
+    sample = list(value.values())[:5]
+    return all(isinstance(item, dict) and "class_type" in item for item in sample)
+
+
+def extract_prompt(document: dict | None) -> tuple[dict, str]:
+    if not document:
+        return {}, "missing"
+    if isinstance(document.get("prompt"), dict):
+        return document["prompt"], "prompt"
+    for key in ("workflow", "prompt_payload", "api_prompt", "payload"):
+        value = document.get(key)
+        if isinstance(value, dict) and isinstance(value.get("prompt"), dict):
+            return value["prompt"], f"{key}.prompt"
+        if looks_like_api_prompt(value):
+            return value, key
+    if looks_like_api_prompt(document):
+        return document, "document"
+    return {}, "not_found"
+
+
+def first_payload_with_prompt() -> tuple[Path | None, dict | None, dict, str]:
+    fallback_path = None
+    fallback_doc = None
+    for candidate in PAYLOAD_CANDIDATES:
+        if not candidate.is_file():
+            continue
+        document = load_json(candidate)
+        if fallback_path is None:
+            fallback_path = candidate
+            fallback_doc = document
+        prompt, source = extract_prompt(document)
+        if prompt:
+            return candidate, document, prompt, source
+    return fallback_path, fallback_doc, {}, "not_found"
+
+
+def prompt_value_is_link(value) -> bool:
+    return isinstance(value, list) and len(value) == 2 and isinstance(value[1], int)
+
+
+def value_preview(value):
+    if prompt_value_is_link(value):
+        return {"value_kind": "link", "preview": value}
+    if isinstance(value, list):
+        return {"value_kind": "list", "preview": value[:6], "length": len(value)}
+    if isinstance(value, dict):
+        return {"value_kind": "dict", "preview": list(value.keys())[:12], "length": len(value)}
+    return {"value_kind": type(value).__name__, "preview": value}
+
+
+def special_input_nodes(prompt: dict) -> list[dict]:
+    target_inputs = {
+        "control_embeds",
+        "pose_embeds",
+        "image_embeds",
+        "audio_embeds",
+        "clip_embeds",
+        "mask",
+        "device",
+    }
+    matches = []
+    for node_id, node in prompt.items():
+        class_type = node.get("class_type", "")
+        for input_name, value in node.get("inputs", {}).items():
+            if input_name in target_inputs:
+                matches.append(
+                    {
+                        "node_id": node_id,
+                        "class_type": class_type,
+                        "input_name": input_name,
+                        **value_preview(value),
+                    }
+                )
+    return matches
 
 
 def link_lookup(workflow: dict) -> dict[int, list]:
@@ -335,11 +419,57 @@ def build_missing_workflow_report(workflow_path: Path | None, requested_path: st
 
 
 def inspect(args: argparse.Namespace) -> int:
+    payload_path, payload_document, prompt_from_payload, prompt_source = first_payload_with_prompt()
+    if prompt_from_payload:
+        counts = class_type_counts(prompt_from_payload)
+        broken_prompt_links = detect_prompt_broken_links(prompt_from_payload)
+        decorative_remnants = detect_decorative_remnants(prompt_from_payload)
+        special_inputs = special_input_nodes(prompt_from_payload)
+        top_level_keys = list(payload_document.keys()) if isinstance(payload_document, dict) else []
+        status = "inspection_found_issues" if broken_prompt_links or decorative_remnants else "ok"
+        report = {
+            "test_id": TEST_ID,
+            "created_at": now_iso(),
+            "status": status,
+            "payload_path": str(payload_path),
+            "payload_source": prompt_source,
+            "top_level_keys": top_level_keys,
+            "node_count": len(prompt_from_payload),
+            "class_type_counts": counts,
+            "special_input_nodes": special_inputs,
+            "broken_prompt_links": broken_prompt_links,
+            "decorative_remnants": decorative_remnants,
+            "no_runpod": True,
+            "no_r2": True,
+            "no_download": True,
+            "no_build_push": True,
+            "not_latentsync": True,
+            "not_wan27": True,
+        }
+        write_json(LOG_PATH, report)
+        print(f"[{TEST_ID}] status={status} log={LOG_PATH}")
+        print(f"[{TEST_ID}] payload={payload_path}")
+        print(f"[{TEST_ID}] top_level_keys={json.dumps(top_level_keys, ensure_ascii=False)}")
+        print(f"[{TEST_ID}] node_count={len(prompt_from_payload)} prompt_source={prompt_source}")
+        print(f"[{TEST_ID}] class_type_counts={json.dumps(counts, ensure_ascii=False, sort_keys=True)}")
+        print(f"[{TEST_ID}] special_input_nodes={len(special_inputs)} broken_prompt_links={len(broken_prompt_links)}")
+        return 0
+
     workflow_path = resolve_workflow_path(args.workflow_local)
     if workflow_path is None or not workflow_path.is_file():
         report = build_missing_workflow_report(workflow_path, args.workflow_local)
+        report.update(
+            {
+                "payload_path": str(payload_path) if payload_path else "",
+                "payload_top_level_keys": list(payload_document.keys()) if isinstance(payload_document, dict) else [],
+                "payload_prompt_source": prompt_source,
+            }
+        )
         write_json(LOG_PATH, report)
         print(f"[{TEST_ID}] workflow_missing log={LOG_PATH}")
+        if payload_path:
+            print(f"[{TEST_ID}] payload_without_prompt={payload_path}")
+            print(f"[{TEST_ID}] top_level_keys={json.dumps(report['payload_top_level_keys'], ensure_ascii=False)}")
         return 0
 
     object_info = load_json(Path(args.object_info_local).expanduser().resolve()) if args.object_info_local else None

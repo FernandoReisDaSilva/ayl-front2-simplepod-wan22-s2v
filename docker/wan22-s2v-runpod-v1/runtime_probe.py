@@ -1309,6 +1309,80 @@ def sanitize_image_resize_inputs(prompt: dict, object_info: dict, changes: list[
     }
 
 
+def sanitize_wanvideo_empty_embeds_inputs(prompt: dict, object_info: dict, changes: list[dict]) -> dict:
+    empty_embeds_changes = []
+    detected_nodes = []
+
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        if class_name != "WanVideoEmptyEmbeds":
+            continue
+        inputs = node.setdefault("inputs", {})
+        detected_nodes.append({"node_id": node_id, "class_type": class_name})
+
+        if "control_embeds" not in inputs:
+            continue
+        old_value = inputs.get("control_embeds")
+        if not isinstance(old_value, (int, str, bool)):
+            continue
+
+        before = len(changes)
+        if object_input_is_optional(object_info, class_name, "control_embeds"):
+            del inputs["control_embeds"]
+            prompt_sanitize_change(
+                changes,
+                node_id,
+                class_name,
+                "control_embeds",
+                old_value,
+                "<removed>",
+                "remove invalid literal control_embeds for V1 minimum probe",
+            )
+        else:
+            inputs["control_embeds"] = None
+            prompt_sanitize_change(
+                changes,
+                node_id,
+                class_name,
+                "control_embeds",
+                old_value,
+                None,
+                "set invalid literal control_embeds to None for V1 minimum probe",
+            )
+        if len(changes) > before:
+            empty_embeds_changes.append(changes[-1])
+
+    remaining_invalid_values = []
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        if class_name != "WanVideoEmptyEmbeds":
+            continue
+        value = node.get("inputs", {}).get("control_embeds")
+        if isinstance(value, (int, str, bool)):
+            remaining_invalid_values.append(
+                {
+                    "node_id": node_id,
+                    "class_type": class_name,
+                    "input_name": "control_embeds",
+                    "value": value,
+                    "reason": "wanvideo_empty_embeds_invalid_control_embeds",
+                }
+            )
+
+    if empty_embeds_changes:
+        policy = "payload_control_applied"
+    elif detected_nodes:
+        policy = "wanvideo_empty_embeds_detected_no_change_needed"
+    else:
+        policy = "no_wanvideo_empty_embeds_node_found"
+    return {
+        "wanvideo_empty_embeds_policy": policy,
+        "wanvideo_empty_embeds_detected_nodes": detected_nodes,
+        "wanvideo_empty_embeds_sanitize_changes": empty_embeds_changes,
+        "wanvideo_empty_embeds_remaining_invalid_values": remaining_invalid_values,
+    }
+
+
 def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]:
     changes: list[dict] = []
     errors: list[str] = []
@@ -1372,6 +1446,7 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
             )
 
     image_resize_report = sanitize_image_resize_inputs(prompt, object_info, changes)
+    wanvideo_empty_embeds_report = sanitize_wanvideo_empty_embeds_inputs(prompt, object_info, changes)
     sageattention_report = sanitize_sageattention_inputs(prompt, object_info, changes)
     torch_precision_report = sanitize_torch_precision_inputs(prompt, object_info, changes)
     remaining_suspect_values = []
@@ -1395,6 +1470,8 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
         errors.append("Invalid ImageResizeKJv2 mask string values remain after sanitize.")
     if image_resize_report["image_resize_remaining_invalid_combinations"]:
         errors.append("Invalid ImageResizeKJv2 lanczos + gpu combination remains after sanitize.")
+    if wanvideo_empty_embeds_report["wanvideo_empty_embeds_remaining_invalid_values"]:
+        errors.append("Invalid WanVideoEmptyEmbeds control_embeds literal values remain after sanitize.")
     if torch_precision_report["torch_precision_remaining_fast_values"]:
         errors.append("Fast torch precision values remain in prompt inputs after sanitize.")
     return prompt, {
@@ -1403,8 +1480,135 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
         "prompt_sanitize_errors": errors,
         "prompt_sanitize_remaining_suspect_values": remaining_suspect_values,
         **image_resize_report,
+        **wanvideo_empty_embeds_report,
         **sageattention_report,
         **torch_precision_report,
+    }
+
+
+def prompt_value_is_link(value) -> bool:
+    return isinstance(value, list) and len(value) == 2 and isinstance(value[1], int)
+
+
+def prompt_value_is_primitive_literal(value) -> bool:
+    return isinstance(value, (str, int, float, bool))
+
+
+def prompt_value_contains_html(value) -> bool:
+    return isinstance(value, str) and ("<tr" in value.lower() or "<td" in value.lower() or "</" in value.lower())
+
+
+def preflight_prompt_semantics(prompt: dict, object_info: dict) -> dict:
+    findings = []
+    primitive_embed_inputs = []
+    control_embed_literal_ints = []
+    mask_string_inputs = []
+    html_string_inputs = []
+    wanvideo_empty_embeds_invalid_control_embeds = []
+    invalid_resize_combinations = []
+    fast_precision_inputs = []
+    sageattention_enabled_inputs = []
+    suspicious_inputs = []
+    wanvideo_optional_literals = []
+
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        inputs = node.get("inputs", {})
+        for input_name, value in inputs.items():
+            lower_name = str(input_name).lower()
+            lower_value = str(value).lower() if isinstance(value, str) else ""
+            item = {
+                "node_id": node_id,
+                "class_type": class_name,
+                "input_name": input_name,
+                "value": value,
+            }
+            if "embed" in lower_name and prompt_value_is_primitive_literal(value):
+                primitive_embed_inputs.append(item)
+                findings.append({**item, "reason": "embed_input_has_primitive_literal"})
+            if input_name == "control_embeds" and isinstance(value, int):
+                control_embed_literal_ints.append(item)
+                findings.append({**item, "reason": "control_embeds_literal_int"})
+            if (
+                class_name == "WanVideoEmptyEmbeds"
+                and input_name == "control_embeds"
+                and isinstance(value, (int, str, bool))
+            ):
+                wanvideo_empty_embeds_invalid_control_embeds.append(item)
+                findings.append({**item, "reason": "wanvideo_empty_embeds_invalid_control_embeds"})
+            if "mask" in lower_name and isinstance(value, str):
+                mask_string_inputs.append(item)
+                findings.append({**item, "reason": "mask_string"})
+            if prompt_value_contains_html(value):
+                html_string_inputs.append({**item, "value_truncated": value[:1000]})
+                findings.append({**item, "value_truncated": value[:1000], "reason": "html_string"})
+            if input_name == "base_precision" and "fast" in lower_value:
+                fast_precision_inputs.append(item)
+                findings.append({**item, "reason": "fast_base_precision"})
+            if input_name == "attention_mode" and lower_value.startswith("sage"):
+                sageattention_enabled_inputs.append(item)
+                findings.append({**item, "reason": "sageattention_enabled"})
+            if ("tensor" in lower_name or "image" in lower_name or "audio" in lower_name) and isinstance(value, str):
+                suspicious_inputs.append({**item, "reason": "string_in_tensor_like_input"})
+            if ("dict" in lower_name or "control" in lower_name) and isinstance(value, int):
+                suspicious_inputs.append({**item, "reason": "int_in_dict_or_control_like_input"})
+            if ("scheduler" in lower_name or "mode" in lower_name) and isinstance(value, bool):
+                suspicious_inputs.append({**item, "reason": "bool_in_scheduler_or_mode_input"})
+
+            if class_name.startswith("WanVideo") and prompt_value_is_primitive_literal(value):
+                spec = object_input_spec(object_info, class_name, input_name)
+                if spec is not None and object_input_is_optional(object_info, class_name, input_name):
+                    wanvideo_optional_literals.append(
+                        {
+                            **item,
+                            "object_info_spec": spec,
+                            "reason": "wanvideo_optional_literal_for_review",
+                        }
+                    )
+
+        if class_name == "ImageResizeKJv2":
+            if inputs.get("upscale_method") == "lanczos" and inputs.get("device") == "gpu":
+                invalid_resize_combinations.append(
+                    {
+                        "node_id": node_id,
+                        "class_type": class_name,
+                        "upscale_method": inputs.get("upscale_method"),
+                        "device": inputs.get("device"),
+                    }
+                )
+
+    errors = []
+    if primitive_embed_inputs:
+        errors.append("Primitive literal values remain in embed inputs.")
+    if control_embed_literal_ints:
+        errors.append("control_embeds contains a literal int.")
+    if wanvideo_empty_embeds_invalid_control_embeds:
+        errors.append("wanvideo_empty_embeds_invalid_control_embeds")
+    if mask_string_inputs:
+        errors.append("String mask inputs remain.")
+    if html_string_inputs:
+        errors.append("HTML-like string inputs remain.")
+    if invalid_resize_combinations:
+        errors.append("ImageResizeKJv2 lanczos + gpu combination remains.")
+    if fast_precision_inputs:
+        errors.append("Fast base_precision values remain.")
+    if sageattention_enabled_inputs:
+        errors.append("SageAttention attention_mode remains enabled.")
+
+    return {
+        "prompt_semantics_preflight_status": "error" if errors else "ok",
+        "prompt_semantics_preflight_errors": errors,
+        "prompt_semantics_preflight_findings": findings,
+        "prompt_semantics_primitive_embed_inputs": primitive_embed_inputs,
+        "prompt_semantics_control_embed_literal_ints": control_embed_literal_ints,
+        "prompt_semantics_wanvideo_empty_embeds_invalid_control_embeds": wanvideo_empty_embeds_invalid_control_embeds,
+        "prompt_semantics_mask_string_inputs": mask_string_inputs,
+        "prompt_semantics_html_string_inputs": html_string_inputs,
+        "prompt_semantics_invalid_resize_combinations": invalid_resize_combinations,
+        "prompt_semantics_fast_precision_inputs": fast_precision_inputs,
+        "prompt_semantics_sageattention_enabled_inputs": sageattention_enabled_inputs,
+        "prompt_semantics_suspicious_inputs": suspicious_inputs,
+        "prompt_semantics_wanvideo_optional_literals": wanvideo_optional_literals,
     }
 
 
@@ -1614,6 +1818,18 @@ def build_report(mode: str) -> dict:
                 }
             )
             write_progress(mode, "prompt_sanitize_error", prompt_sanitize)
+            return report
+        prompt_semantics_preflight = preflight_prompt_semantics(prompt, object_info)
+        report.update(prompt_semantics_preflight)
+        if prompt_semantics_preflight["prompt_semantics_preflight_status"] == "error":
+            report.update(
+                {
+                    "runtime_probe_status": "prompt_semantics_preflight_error",
+                    "output_upload_status": "not_attempted",
+                    "error_truncated": "; ".join(prompt_semantics_preflight["prompt_semantics_preflight_errors"])[:2000],
+                }
+            )
+            write_progress(mode, "prompt_semantics_preflight_error", prompt_semantics_preflight)
             return report
         report["prompt_node_count"] = len(prompt)
         report["workflow_control_node_ids"] = {"sampler": 27, "s2v_embeds": 101, "image": 73, "audio": 94, "video_combine": [30, 97]}
