@@ -1115,6 +1115,81 @@ def sanitize_sageattention_inputs(prompt: dict, object_info: dict, changes: list
     }
 
 
+def safe_torch_precision_value(options: list) -> str:
+    if "fp16" in options:
+        return "fp16"
+    non_fast = [str(item) for item in options if "fast" not in str(item).lower()]
+    for preferred in ("bf16", "fp32", "fp8_e4m3fn", "fp8_e4m3fn_scaled"):
+        if preferred in non_fast:
+            return preferred
+    return non_fast[0] if non_fast else ""
+
+
+def sanitize_torch_precision_inputs(prompt: dict, object_info: dict, changes: list[dict]) -> dict:
+    precision_changes = []
+    detected = []
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        if class_name != "WanVideoModelLoader":
+            continue
+        inputs = node.setdefault("inputs", {})
+        if "base_precision" not in inputs:
+            continue
+        old_value = inputs.get("base_precision")
+        options = input_options(object_info, class_name, "base_precision")
+        detected.append(
+            {
+                "node_id": node_id,
+                "class_type": class_name,
+                "input_name": "base_precision",
+                "old_value": old_value,
+                "object_info_options": options,
+            }
+        )
+        if "fast" not in str(old_value).lower():
+            continue
+        new_value = safe_torch_precision_value(options) or "fp16"
+        inputs["base_precision"] = new_value
+        before = len(changes)
+        prompt_sanitize_change(
+            changes,
+            node_id,
+            class_name,
+            "base_precision",
+            old_value,
+            new_value,
+            "avoid fp16_fast path requiring torch allow_fp16_accumulation",
+        )
+        if len(changes) > before:
+            precision_changes.append(changes[-1])
+
+    remaining_fast = []
+    for node_id, node in prompt.items():
+        class_name = str(node.get("class_type", ""))
+        value = node.get("inputs", {}).get("base_precision")
+        if value is not None and "fast" in str(value).lower():
+            remaining_fast.append(
+                {
+                    "node_id": node_id,
+                    "class_type": class_name,
+                    "input_name": "base_precision",
+                    "value": value,
+                }
+            )
+    if precision_changes:
+        policy = "payload_control_applied"
+    elif detected:
+        policy = "base_precision_detected_no_change_needed"
+    else:
+        policy = "no_base_precision_input_found"
+    return {
+        "torch_precision_policy": policy,
+        "torch_precision_detected_inputs": detected,
+        "torch_precision_sanitize_changes": precision_changes,
+        "torch_precision_remaining_fast_values": remaining_fast,
+    }
+
+
 def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]:
     changes: list[dict] = []
     errors: list[str] = []
@@ -1183,6 +1258,7 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
             )
 
     sageattention_report = sanitize_sageattention_inputs(prompt, object_info, changes)
+    torch_precision_report = sanitize_torch_precision_inputs(prompt, object_info, changes)
     remaining_suspect_values = []
     for node_id, node in prompt.items():
         class_name = str(node.get("class_type", ""))
@@ -1200,12 +1276,15 @@ def sanitize_prompt_values(prompt: dict, object_info: dict) -> tuple[dict, dict]
 
     if remaining_suspect_values:
         errors.append("HTML-like string values remain in prompt inputs after sanitize.")
+    if torch_precision_report["torch_precision_remaining_fast_values"]:
+        errors.append("Fast torch precision values remain in prompt inputs after sanitize.")
     return prompt, {
         "prompt_sanitize_status": "error" if errors else "ok",
         "prompt_sanitize_changes": changes,
         "prompt_sanitize_errors": errors,
         "prompt_sanitize_remaining_suspect_values": remaining_suspect_values,
         **sageattention_report,
+        **torch_precision_report,
     }
 
 

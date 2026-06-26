@@ -423,6 +423,48 @@ sageattention_policy=no_payload_control_found
 
 Nenhuma instalacao de `sageattention` foi adicionada nesta etapa.
 
+## Ajuste Pos 0.1.10
+
+No probe `0.1.10`, o payload foi aceito, a execucao iniciou e SageAttention foi desabilitado com:
+
+```text
+attention_mode=sdpa
+```
+
+Novo bloqueio no `WanVideoModelLoader` node `22`:
+
+```text
+torch.backends.cuda.matmul.allow_fp16_accumulation is not available in this version of torch,
+requires torch 2.7.0.dev2025 02 26 nightly minimum currently
+```
+
+Inputs relevantes:
+
+```text
+base_precision=fp16_fast
+quantization=fp8_e4m3fn_scaled
+load_device=offload_device
+attention_mode=sdpa
+```
+
+Decisao V1: nao atualizar Torch agora. O payload deve evitar o caminho `fp16_fast`.
+
+`sanitize_prompt_values(prompt, object_info)` agora detecta `WanVideoModelLoader.base_precision` e troca `fp16_fast` para:
+
+- `fp16`, se aceito pelo `object_info`;
+- caso contrario, a opcao mais segura disponivel sem `fast`.
+
+O `final_report.json` passa a incluir:
+
+```text
+torch_precision_policy
+torch_precision_detected_inputs
+torch_precision_sanitize_changes
+torch_precision_remaining_fast_values
+```
+
+Se ainda restar `base_precision` contendo `fast`, o worker falha antes do POST com `runtime_probe_status=prompt_sanitize_error`, evitando repetir o erro caro na execucao.
+
 ## Payload Debug
 
 O prompt enviado ao ComfyUI e salvo localmente antes do POST:
@@ -460,7 +502,7 @@ Esta alteracao:
 ## Proxima Tag Sugerida
 
 ```text
-0.1.10
+0.1.11
 ```
 
 ## Validacoes
