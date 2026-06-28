@@ -35,6 +35,9 @@ R2_INPUT_REFERENCE_IMAGE_KEY = "tests/runpod_wan22_s2v_probe_v1/input/mae_refere
 R2_INPUT_AUDIO_KEY = "tests/runpod_wan22_s2v_probe_v1/input/mae_audio_5s.wav"
 R2_OUTPUT_VIDEO_KEY = "tests/runpod_wan22_s2v_probe_v1/output/video_out.mp4"
 R2_WAN22_MODEL_PREFIX = "checkpoints/wan22_s2v/comfyui_models/"
+DEFAULT_OUTPUT_FILENAME_PREFIX = "ayl_wan22_s2v_probe_v1/video_out"
+DEFAULT_POSITIVE_PROMPT = "a woman is singing passionately"
+DEFAULT_NEGATIVE_PROMPT = ""
 
 REQUIRED_FINAL_REPORT_FIELDS = (
     "runtime_probe_status",
@@ -183,6 +186,11 @@ def control_env(args: argparse.Namespace) -> list[dict]:
         {"key": "WAN22_S2V_AUDIO_SCALE", "value": str(args.audio_scale)},
         {"key": "WAN22_S2V_POSE_START_PERCENT", "value": str(args.pose_start_percent)},
         {"key": "WAN22_S2V_POSE_END_PERCENT", "value": str(args.pose_end_percent)},
+        {"key": "WAN22_S2V_WIDTH", "value": str(args.width)},
+        {"key": "WAN22_S2V_HEIGHT", "value": str(args.height)},
+        {"key": "WAN22_S2V_OUTPUT_FILENAME_PREFIX", "value": args.output_filename_prefix},
+        {"key": "WAN22_S2V_POSITIVE_PROMPT", "value": args.positive_prompt},
+        {"key": "WAN22_S2V_NEGATIVE_PROMPT", "value": args.negative_prompt},
         {"key": "WAN22_S2V_PROMPT_TIMEOUT_SECONDS", "value": str(args.prompt_timeout_seconds)},
     ]
 
@@ -199,7 +207,7 @@ def redacted_env(args: argparse.Namespace | None = None) -> list[dict]:
         {"key": "R2_FINAL_REPORT_KEY", "value": R2_FINAL_REPORT_KEY},
         {"key": "R2_INPUT_REFERENCE_IMAGE_KEY", "value": R2_INPUT_REFERENCE_IMAGE_KEY},
         {"key": "R2_INPUT_AUDIO_KEY", "value": R2_INPUT_AUDIO_KEY},
-        {"key": "R2_OUTPUT_VIDEO_KEY", "value": R2_OUTPUT_VIDEO_KEY},
+        {"key": "R2_OUTPUT_VIDEO_KEY", "value": args.output_video_key if args else R2_OUTPUT_VIDEO_KEY},
         {"key": "R2_WAN22_MODEL_PREFIX", "value": R2_WAN22_MODEL_PREFIX},
         {"key": "R2_ENDPOINT", "value": "<redacted>"},
         {"key": "R2_ACCESS_KEY_ID", "value": "<redacted>"},
@@ -224,7 +232,7 @@ def pod_env(config: dict, marker_nonce: str, args: argparse.Namespace) -> list[d
         {"key": "R2_FINAL_REPORT_KEY", "value": R2_FINAL_REPORT_KEY},
         {"key": "R2_INPUT_REFERENCE_IMAGE_KEY", "value": R2_INPUT_REFERENCE_IMAGE_KEY},
         {"key": "R2_INPUT_AUDIO_KEY", "value": R2_INPUT_AUDIO_KEY},
-        {"key": "R2_OUTPUT_VIDEO_KEY", "value": R2_OUTPUT_VIDEO_KEY},
+        {"key": "R2_OUTPUT_VIDEO_KEY", "value": args.output_video_key},
         {"key": "R2_WAN22_MODEL_PREFIX", "value": R2_WAN22_MODEL_PREFIX},
     ]
 
@@ -273,7 +281,7 @@ def intended_payload(args: argparse.Namespace, marker_nonce: str) -> dict:
         "not_wan27": True,
         "r2_progress_key": R2_PROGRESS_KEY,
         "r2_final_report_key": R2_FINAL_REPORT_KEY,
-        "r2_output_video_key": R2_OUTPUT_VIDEO_KEY,
+        "r2_output_video_key": args.output_video_key,
         "r2_input_keys": {"reference_image": R2_INPUT_REFERENCE_IMAGE_KEY, "audio": R2_INPUT_AUDIO_KEY, "model_prefix": R2_WAN22_MODEL_PREFIX},
         "marker_nonce": marker_nonce,
         "mutation_input_redacted": {
@@ -352,7 +360,7 @@ def build_log(args: argparse.Namespace, **values) -> dict:
         "not_wan27": True,
         "r2_progress_key": R2_PROGRESS_KEY,
         "r2_final_report_key": R2_FINAL_REPORT_KEY,
-        "r2_output_video_key": R2_OUTPUT_VIDEO_KEY,
+        "r2_output_video_key": args.output_video_key,
     }
     data.update(values)
     return data
@@ -429,7 +437,7 @@ def run(args: argparse.Namespace) -> int:
         client = r2_client(config)
         r2_delete_if_exists(client, config["bucket"], R2_PROGRESS_KEY)
         r2_delete_if_exists(client, config["bucket"], R2_FINAL_REPORT_KEY)
-        r2_delete_if_exists(client, config["bucket"], R2_OUTPUT_VIDEO_KEY)
+        r2_delete_if_exists(client, config["bucket"], args.output_video_key)
 
         requests = import_requests()
         api_key = os.environ["RUNPOD_API_KEY"]
@@ -522,6 +530,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-scale", type=float, default=1.0)
     parser.add_argument("--pose-start-percent", type=float, default=0.0)
     parser.add_argument("--pose-end-percent", type=float, default=1.0)
+    parser.add_argument("--width", type=int, default=960)
+    parser.add_argument("--height", type=int, default=640)
+    parser.add_argument("--output-filename-prefix", default=DEFAULT_OUTPUT_FILENAME_PREFIX)
+    parser.add_argument("--output-video-key", default=R2_OUTPUT_VIDEO_KEY)
+    parser.add_argument("--positive-prompt", default=DEFAULT_POSITIVE_PROMPT)
+    parser.add_argument("--negative-prompt", default=DEFAULT_NEGATIVE_PROMPT)
     parser.add_argument("--prompt-timeout-seconds", type=int, default=1800)
     return parser.parse_args()
 

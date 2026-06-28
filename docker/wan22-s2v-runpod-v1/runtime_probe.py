@@ -167,6 +167,11 @@ def env_presence() -> dict:
         "WAN22_S2V_AUDIO_SCALE",
         "WAN22_S2V_POSE_START_PERCENT",
         "WAN22_S2V_POSE_END_PERCENT",
+        "WAN22_S2V_WIDTH",
+        "WAN22_S2V_HEIGHT",
+        "WAN22_S2V_OUTPUT_FILENAME_PREFIX",
+        "WAN22_S2V_POSITIVE_PROMPT",
+        "WAN22_S2V_NEGATIVE_PROMPT",
         *R2_ENV_KEYS,
     )
     return {key: bool(os.getenv(key, "")) for key in keys}
@@ -397,6 +402,8 @@ def convert_ui_workflow_to_api(workflow: dict, object_info: dict) -> dict:
 def patch_prompt(prompt: dict) -> dict:
     prompt["73"]["inputs"]["image"] = REFERENCE_PATH.name
     prompt["94"]["inputs"]["audio_file"] = str(Path("input") / AUDIO_PATH.name)
+    target_width = env_int("WAN22_S2V_WIDTH", 960)
+    target_height = env_int("WAN22_S2V_HEIGHT", 640)
     prompt["27"]["inputs"].update(
         {
             "steps": env_int("WAN22_S2V_STEPS", 4),
@@ -413,11 +420,30 @@ def patch_prompt(prompt: dict) -> dict:
             "pose_end_percent": env_float("WAN22_S2V_POSE_END_PERCENT", 1.0),
         }
     )
+    if "67" in prompt:
+        prompt["67"]["inputs"].update(
+            {
+                "positive_prompt": os.getenv("WAN22_S2V_POSITIVE_PROMPT", "a woman is singing passionately"),
+            }
+        )
+        negative_prompt = os.getenv("WAN22_S2V_NEGATIVE_PROMPT", "")
+        if negative_prompt:
+            prompt["67"]["inputs"]["negative_prompt"] = negative_prompt
+    if "74" in prompt:
+        prompt["74"]["inputs"].update(
+            {
+                "width": target_width,
+                "height": target_height,
+                "keep_proportion": "crop",
+                "crop_position": "center",
+                "device": "cpu",
+            }
+        )
     for node_id in ("30", "97"):
         if node_id in prompt:
             prompt[node_id]["inputs"].update(
                 {
-                    "filename_prefix": "ayl_wan22_s2v_probe_v1/video_out",
+                    "filename_prefix": os.getenv("WAN22_S2V_OUTPUT_FILENAME_PREFIX", "ayl_wan22_s2v_probe_v1/video_out"),
                     "save_output": True,
                     "format": "video/h264-mp4",
                     "trim_to_audio": True,
@@ -2062,6 +2088,11 @@ def build_report(mode: str) -> dict:
         "audio_scale": env_float("WAN22_S2V_AUDIO_SCALE", 1.0),
         "pose_start_percent": env_float("WAN22_S2V_POSE_START_PERCENT", 0.0),
         "pose_end_percent": env_float("WAN22_S2V_POSE_END_PERCENT", 1.0),
+        "width": env_int("WAN22_S2V_WIDTH", 960),
+        "height": env_int("WAN22_S2V_HEIGHT", 640),
+        "output_filename_prefix": os.getenv("WAN22_S2V_OUTPUT_FILENAME_PREFIX", "ayl_wan22_s2v_probe_v1/video_out"),
+        "positive_prompt": os.getenv("WAN22_S2V_POSITIVE_PROMPT", ""),
+        "negative_prompt_present": bool(os.getenv("WAN22_S2V_NEGATIVE_PROMPT", "")),
     }
     report.update({"r2_keys": keys, "wan22_s2v_controls": controls, "workflow_path": str(WORKFLOW_PATH)})
 
