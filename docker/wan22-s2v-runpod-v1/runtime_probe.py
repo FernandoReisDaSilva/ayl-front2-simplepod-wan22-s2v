@@ -28,10 +28,13 @@ COMFYUI_PATH = Path(os.getenv("COMFYUI_PATH", "/opt/ComfyUI"))
 WORKSPACE = Path("/workspace")
 INPUT_DIR = WORKSPACE / "input"
 OUTPUT_DIR = WORKSPACE / "output"
+LOG_DIR = WORKSPACE / "logs"
 REFERENCE_PATH = INPUT_DIR / "mae_reference.png"
 AUDIO_PATH = INPUT_DIR / "mae_audio_5s.wav"
 OUTPUT_PATH = OUTPUT_DIR / "video_out.mp4"
 PROMPT_DEBUG_PATH = WORKSPACE / "wan22_s2v_prompt_payload_debug.json"
+COMFY_STDOUT_PATH = LOG_DIR / "comfyui_stdout.log"
+COMFY_STDERR_PATH = LOG_DIR / "comfyui_stderr.log"
 WORKFLOW_PATH = Path(os.getenv("AYL_WAN22_S2V_WORKFLOW_PATH", "/opt/ayl/workflows/wanvideo2_2_S2V_context_window_testing.json"))
 COMFY_HOST = os.getenv("AYL_COMFY_HOST", "127.0.0.1")
 COMFY_PORT = int(os.getenv("AYL_COMFY_PORT", "8188"))
@@ -60,6 +63,12 @@ REPORT_ONLY_NON_DECORATIVE_NODE_TYPES = {
 
 
 class ComfyPromptHTTPError(RuntimeError):
+    def __init__(self, message: str, diagnostics: dict):
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+
+class ComfyReadinessError(TimeoutError):
     def __init__(self, message: str, diagnostics: dict):
         super().__init__(message)
         self.diagnostics = diagnostics
@@ -147,6 +156,23 @@ def file_facts(path: Path) -> dict:
     return {"path": str(path), "exists": path.exists(), "size_bytes": path.stat().st_size if path.exists() else 0}
 
 
+def tail_file(path: Path, limit_chars: int = 20000) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > limit_chars:
+                handle.seek(max(0, size - limit_chars))
+            data = handle.read()
+        text = data.decode("utf-8", errors="replace")
+        if size > limit_chars:
+            return f"... tail last {limit_chars} chars ...\n{text}"
+        return text
+    except Exception as exc:
+        return f"<failed to read {path}: {str(exc)[:500]}>"
+
+
 def env_presence() -> dict:
     keys = (
         "AYL_RUN_MODE",
@@ -225,11 +251,8 @@ def copy_inputs_to_comfy() -> None:
     shutil.copy2(AUDIO_PATH, comfy_input / AUDIO_PATH.name)
 
 
-def start_comfy() -> subprocess.Popen:
-    comfy_env = os.environ.copy()
-    comfy_env["TORCHDYNAMO_DISABLE"] = "1"
-    comfy_env["TORCH_COMPILE_DISABLE"] = "1"
-    command = [
+def comfy_start_command() -> list[str]:
+    return [
         sys.executable,
         "main.py",
         "--listen",
@@ -238,29 +261,79 @@ def start_comfy() -> subprocess.Popen:
         str(COMFY_PORT),
         "--disable-auto-launch",
     ]
-    return subprocess.Popen(
-        command,
-        cwd=str(COMFYUI_PATH),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=comfy_env,
-    )
 
 
-def wait_comfy(timeout_seconds: int = 120) -> dict:
+def comfy_process_diagnostics(comfy_proc: subprocess.Popen | None, readiness: dict | None = None) -> dict:
+    diagnostics = {
+        "comfyui_start_command": comfy_start_command(),
+        "comfyui_pid": comfy_proc.pid if comfy_proc else None,
+        "comfyui_returncode": comfy_proc.poll() if comfy_proc else None,
+        "comfyui_stdout_path": str(COMFY_STDOUT_PATH),
+        "comfyui_stderr_path": str(COMFY_STDERR_PATH),
+        "comfyui_stdout_tail": tail_file(COMFY_STDOUT_PATH),
+        "comfyui_stderr_tail": tail_file(COMFY_STDERR_PATH),
+    }
+    if readiness:
+        diagnostics.update(readiness)
+    return diagnostics
+
+
+def start_comfy() -> subprocess.Popen:
+    comfy_env = os.environ.copy()
+    comfy_env["TORCHDYNAMO_DISABLE"] = "1"
+    comfy_env["TORCH_COMPILE_DISABLE"] = "1"
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    stdout_handle = COMFY_STDOUT_PATH.open("w", encoding="utf-8")
+    stderr_handle = COMFY_STDERR_PATH.open("w", encoding="utf-8")
+    try:
+        return subprocess.Popen(
+            comfy_start_command(),
+            cwd=str(COMFYUI_PATH),
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            text=True,
+            env=comfy_env,
+        )
+    finally:
+        stdout_handle.close()
+        stderr_handle.close()
+
+
+def wait_comfy(comfy_proc: subprocess.Popen, timeout_seconds: int = 300) -> tuple[dict, dict]:
+    started_at = time.monotonic()
     deadline = time.monotonic() + timeout_seconds
     last_error = ""
+    attempts = 0
     while time.monotonic() < deadline:
+        attempts += 1
+        returncode = comfy_proc.poll()
+        if returncode is not None:
+            readiness = {
+                "readiness_wait_seconds": round(time.monotonic() - started_at, 3),
+                "readiness_attempts": attempts,
+                "readiness_timeout_seconds": timeout_seconds,
+            }
+            diagnostics = comfy_process_diagnostics(comfy_proc, readiness)
+            raise ComfyReadinessError(f"ComfyUI exited before readiness with returncode {returncode}", diagnostics)
         try:
             response = requests.get(f"{COMFY_BASE}/object_info", timeout=5)
             if response.status_code == 200:
-                return response.json()
+                return response.json(), {
+                    "readiness_wait_seconds": round(time.monotonic() - started_at, 3),
+                    "readiness_attempts": attempts,
+                    "readiness_timeout_seconds": timeout_seconds,
+                }
             last_error = f"HTTP {response.status_code}"
         except Exception as exc:
             last_error = str(exc)
         time.sleep(2)
-    raise TimeoutError(f"ComfyUI did not become ready: {last_error[:500]}")
+    readiness = {
+        "readiness_wait_seconds": round(time.monotonic() - started_at, 3),
+        "readiness_attempts": attempts,
+        "readiness_timeout_seconds": timeout_seconds,
+    }
+    diagnostics = comfy_process_diagnostics(comfy_proc, readiness)
+    raise ComfyReadinessError(f"ComfyUI did not become ready: {last_error[:500]}", diagnostics)
 
 
 def validate_nodes(object_info: dict) -> dict:
@@ -2113,10 +2186,13 @@ def build_report(mode: str) -> dict:
     report["model_download"] = model_download
     write_progress(mode, "model_download_done", {"model_download": model_download})
 
-    comfy_proc = start_comfy()
-    report["comfyui_started"] = True
+    comfy_proc = None
     try:
-        object_info = wait_comfy(env_int("WAN22_S2V_COMFY_READY_TIMEOUT_SECONDS", 180))
+        comfy_proc = start_comfy()
+        report["comfyui_started"] = True
+        report.update(comfy_process_diagnostics(comfy_proc))
+        object_info, readiness = wait_comfy(comfy_proc, env_int("WAN22_S2V_COMFY_READY_TIMEOUT_SECONDS", 300))
+        report.update(comfy_process_diagnostics(comfy_proc, readiness))
         node_validation = validate_nodes(object_info)
         report["node_validation"] = node_validation
         write_progress(mode, "comfyui_object_info_validated", {"node_validation": node_validation})
@@ -2252,12 +2328,55 @@ def build_report(mode: str) -> dict:
         )
         write_progress(mode, "output_upload_done", {"output_file": report["output_file"], "r2_output_video_key": keys["output_video"]})
         return report
+    except ComfyReadinessError as exc:
+        report.update(
+            {
+                "runtime_probe_status": "failed",
+                "output_upload_status": "not_attempted",
+                "error_truncated": str(exc)[:2000],
+                **exc.diagnostics,
+            }
+        )
+        write_progress(
+            mode,
+            "comfyui_readiness_failed",
+            {
+                "error_truncated": report["error_truncated"],
+                "comfyui_pid": report.get("comfyui_pid"),
+                "comfyui_returncode": report.get("comfyui_returncode"),
+                "readiness_wait_seconds": report.get("readiness_wait_seconds"),
+                "readiness_attempts": report.get("readiness_attempts"),
+            },
+        )
+        return report
+    except Exception as exc:
+        report.update(
+            {
+                "runtime_probe_status": "failed",
+                "output_upload_status": "not_attempted",
+                "error_truncated": str(exc)[:2000],
+                **comfy_process_diagnostics(comfy_proc),
+            }
+        )
+        write_progress(
+            mode,
+            "runtime_probe_failed",
+            {
+                "error_truncated": report["error_truncated"],
+                "comfyui_pid": report.get("comfyui_pid"),
+                "comfyui_returncode": report.get("comfyui_returncode"),
+            },
+        )
+        return report
     finally:
-        comfy_proc.terminate()
-        try:
-            comfy_proc.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            comfy_proc.kill()
+        if comfy_proc and comfy_proc.poll() is None:
+            comfy_proc.terminate()
+            try:
+                comfy_proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                comfy_proc.kill()
+                comfy_proc.wait(timeout=20)
+        report.update(comfy_process_diagnostics(comfy_proc))
 
 
 def run(mode: str) -> int:
