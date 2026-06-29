@@ -1283,9 +1283,9 @@ Contexto validado:
 
 Decisao de imagem:
 
-- nova imagem V2 tag `0.1.4` passa a ser o alvo operacional atual;
-- motivo: a tag `0.1.3` adicionou o gate controlado; a tag `0.1.4` adiciona runner real single job Wan2.2 S2V;
-- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.4`.
+- nova imagem V2 tag `0.1.5` passa a ser o alvo operacional atual;
+- motivo: a tag `0.1.4` adicionou runner real single job; a tag `0.1.5` corrige R2 env injection/aliases e preflight R2;
+- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.5`.
 
 Endpoint administrativo adicionado:
 
@@ -1495,7 +1495,7 @@ review/simplepod_mae_fr_14_8s_1080_inference_plan_v1.md
 Imagem alvo:
 
 ```text
-ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.4
+ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.5
 ```
 
 Endpoint:
@@ -1512,7 +1512,17 @@ Status do endpoint:
 - usa pesos locais do Network Drive;
 - chama `app.wan22_s2v_generate_wrapper`;
 - envia MP4 e report final ao R2;
+- aceita aliases R2 `R2_ENDPOINT/R2_ENDPOINT_URL` e `R2_BUCKET/R2_BUCKET_NAME`;
+- faz preflight HEAD dos inputs antes da inferencia;
 - nao gera placeholder.
+
+R2 env:
+
+- fonte local: `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_REGION`;
+- runtime endpoint: `R2_ENDPOINT` ou `R2_ENDPOINT_URL`;
+- runtime bucket: `R2_BUCKET` ou `R2_BUCKET_NAME`;
+- runtime region: `R2_REGION`, fallback `auto`;
+- reports apenas `PRESENT/MISSING`, sem valores reais.
 
 Script:
 

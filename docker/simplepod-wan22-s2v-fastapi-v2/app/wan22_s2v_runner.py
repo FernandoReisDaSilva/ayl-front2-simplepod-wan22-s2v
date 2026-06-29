@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .r2_client import download_file, r2_env_presence, r2_env_ready, upload_file
+from .r2_client import download_file, get_r2_client, head_object, r2_env_alias_presence, r2_env_ready, resolved_r2_env, upload_file
 from .reporting import now_iso
 from .settings import get_settings
 
@@ -178,6 +178,66 @@ def file_facts(path: Path) -> dict:
     }
 
 
+def safe_head_object(key: str) -> dict:
+    try:
+        return head_object(key)
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "key": key,
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:500],
+        }
+
+
+def safe_upload_permission_check(job_id: str, output_report_key: str) -> dict:
+    if not r2_env_ready():
+        return {"status": "skipped_missing_r2_env"}
+    check_key = f"{output_report_key}.preflight_write_check_{job_id}.json"
+    body = json.dumps({"job_id": job_id, "purpose": "preflight_write_check"}).encode("utf-8")
+    resolved = resolved_r2_env()
+    try:
+        client = get_r2_client()
+        client.put_object(Bucket=resolved["bucket"], Key=check_key, Body=body, ContentType="application/json")
+        delete_status = "not_attempted"
+        try:
+            client.delete_object(Bucket=resolved["bucket"], Key=check_key)
+            delete_status = "succeeded"
+        except Exception:
+            delete_status = "failed_non_blocking"
+        return {"status": "succeeded", "key": check_key, "delete_status": delete_status}
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "key": check_key,
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:500],
+        }
+
+
+def r2_preflight(payload: dict[str, Any]) -> dict:
+    env_status = "succeeded" if r2_env_ready() else "missing_env"
+    result = {
+        "r2_env_check_status": env_status,
+        "r2_env_present_redacted": r2_env_alias_presence(),
+        "r2_reference_head_status": safe_head_object(payload["reference_image_key"]) if env_status == "succeeded" else {"status": "skipped_missing_r2_env"},
+        "r2_audio_head_status": safe_head_object(payload["audio_key"]) if env_status == "succeeded" else {"status": "skipped_missing_r2_env"},
+        "r2_upload_permission_check_status": (
+            safe_upload_permission_check(str(payload["job_id"]), payload["output_report_key"])
+            if env_status == "succeeded"
+            else {"status": "skipped_missing_r2_env"}
+        ),
+    }
+    checks = (
+        result["r2_env_check_status"] == "succeeded",
+        result["r2_reference_head_status"].get("status") == "succeeded",
+        result["r2_audio_head_status"].get("status") == "succeeded",
+        result["r2_upload_permission_check_status"].get("status") == "succeeded",
+    )
+    result["status"] = "succeeded" if all(checks) else "failed"
+    return result
+
+
 def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
     settings = get_settings()
     job_id = str(payload["job_id"])
@@ -205,7 +265,7 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
         "target_duration_seconds": payload["target_duration_seconds"],
         "output_video_key": payload["output_video_key"],
         "output_report_key": payload["output_report_key"],
-        "r2_env_present_redacted": r2_env_presence(),
+        "r2_env_present_redacted": r2_env_alias_presence(),
         "r2_client_configured": r2_env_ready(),
         "model_dir": str(settings.wan22_s2v_model_dir),
         "downloads_model_weights": False,
@@ -215,6 +275,20 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
     }
 
     try:
+        preflight = r2_preflight(payload)
+        report["r2_preflight"] = preflight
+        report["r2_env_check_status"] = preflight["r2_env_check_status"]
+        report["r2_reference_head_status"] = preflight["r2_reference_head_status"]
+        report["r2_audio_head_status"] = preflight["r2_audio_head_status"]
+        report["r2_upload_permission_check_status"] = preflight["r2_upload_permission_check_status"]
+        report["r2_upload_permission_check_status"] = preflight["r2_upload_permission_check_status"]
+        if preflight["status"] != "succeeded":
+            report["status"] = "failed_r2_preflight"
+            report["error_type"] = "r2_preflight_failed"
+            report["runtime_seconds"] = round(time.monotonic() - started, 3)
+            write_json(local_report_path, report)
+            return report
+
         download_file(payload["reference_image_key"], input_image)
         download_file(payload["audio_key"], input_audio)
         report["input_files"] = {

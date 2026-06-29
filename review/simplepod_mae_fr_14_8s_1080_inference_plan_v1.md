@@ -22,7 +22,7 @@ Preparar o primeiro gate de inferencia Wan2.2 S2V para Maé FR, 14.8s, 1080x1080
 Nova imagem necessaria: sim.
 
 ```text
-ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.4
+ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.5
 ```
 
 Motivo:
@@ -32,6 +32,8 @@ Motivo:
 - chama o `generate.py` oficial Wan2.2 via wrapper;
 - sobe MP4 real para R2 quando a inferencia conclui;
 - sobe `final_report.json` para R2 em sucesso ou falha;
+- corrige injecao de env R2 usando os nomes reais do `.env` local;
+- adiciona preflight R2 antes da inferencia;
 - nao gera placeholder;
 - nao cria video falso.
 
@@ -53,7 +55,35 @@ Modo atual:
 real_single_job_no_scheduler
 ```
 
-O endpoint valida payload, GPU, R2 env e inventario dos pesos, baixa os inputs do R2, roda inferencia real Wan2.2 S2V e envia MP4/report para R2. Scheduler e paralelismo continuam fora do escopo.
+O endpoint valida payload, GPU, R2 env, HEAD dos inputs R2 e inventario dos pesos, baixa os inputs do R2, roda inferencia real Wan2.2 S2V e envia MP4/report para R2. Scheduler e paralelismo continuam fora do escopo.
+
+## R2 Env
+
+Nomes locais usados como fonte:
+
+- `R2_ENDPOINT`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `R2_BUCKET`
+- `R2_REGION`
+
+Aliases aceitos pelo runtime:
+
+- endpoint: `R2_ENDPOINT` ou `R2_ENDPOINT_URL`
+- bucket: `R2_BUCKET` ou `R2_BUCKET_NAME`
+- access key: `R2_ACCESS_KEY_ID`
+- secret key: `R2_SECRET_ACCESS_KEY`
+- region: `R2_REGION`, com fallback `auto`
+
+O script cliente carrega `.env` explicitamente e injeta as cinco variaveis reais no payload SimplePod. Reports registram apenas `PRESENT/MISSING` e `value=<present_redacted>`.
+
+Preflight antes da inferencia:
+
+- env check;
+- HEAD `reference_image_key`;
+- HEAD `audio_key`;
+- write permission check seguro em chave temporaria;
+- abortar antes de Wan2.2 se env ou HEAD falhar.
 
 ## Payload
 

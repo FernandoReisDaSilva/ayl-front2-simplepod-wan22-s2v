@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_mae_wan22_s2v_14_8s_1080_inference_v1.json"
 
 TEMPLATE_ID = 25114
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.4"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.5"
 MODELS_ROOT = "/mnt/ayl_models"
 MODEL_DIR = "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B"
 HF_HOME = "/mnt/ayl_models/caches/huggingface"
@@ -33,11 +33,56 @@ REFERENCE_IMAGE_KEY = "tests/simplepod_wan22_s2v/inputs/mae_fr_wan22_s2v_14_8s_1
 AUDIO_KEY = "tests/simplepod_wan22_s2v/inputs/mae_fr_wan22_s2v_14_8s_1080_v1/audio/mae_fr_14_8s_cut_for_wan.wav"
 OUTPUT_VIDEO_KEY = "tests/simplepod_wan22_s2v/outputs/mae_fr_wan22_s2v_14_8s_1080_v1.mp4"
 OUTPUT_REPORT_KEY = "tests/simplepod_wan22_s2v/outputs/mae_fr_wan22_s2v_14_8s_1080_v1_final_report.json"
+LOCAL_R2_ENV_KEYS = (
+    "R2_ENDPOINT",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+    "R2_BUCKET",
+    "R2_REGION",
+)
 
 
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_local_env() -> None:
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(dotenv_path=REPO_ROOT / ".env")
+    except Exception:
+        smoke.load_repo_dotenv()
+
+
+def local_r2_env_presence() -> dict:
+    return {
+        key: {
+            "status": "PRESENT" if os.getenv(key, "") else "MISSING",
+            "value": "<present_redacted>" if os.getenv(key, "") else "",
+        }
+        for key in LOCAL_R2_ENV_KEYS
+    }
+
+
+def missing_local_r2_env() -> list[str]:
+    return [key for key in LOCAL_R2_ENV_KEYS if not os.getenv(key, "")]
+
+
+def r2_env_variables_for_instance() -> list[dict]:
+    return [
+        {"name": key, "value": os.getenv(key, "")}
+        for key in LOCAL_R2_ENV_KEYS
+    ]
+
+
+def redact_instance_payload(payload: dict) -> dict:
+    redacted = smoke.redact_value("", payload)
+    for item in redacted.get("envVariables", []):
+        if item.get("name") in LOCAL_R2_ENV_KEYS and item.get("value"):
+            item["value"] = "<present_redacted>"
+    return redacted
 
 
 def inference_payload(allow_oom_fallback: bool = False) -> dict:
@@ -71,6 +116,7 @@ def runtime_payload(instance_market: str) -> dict:
             {"name": "AYL_ENABLE_ADMIN_VERIFY", "value": "1"},
             {"name": "AYL_RUNTIME_VERSION", "value": "v2-first-inference-gate"},
             {"name": "PYTHONUNBUFFERED", "value": "1"},
+            *r2_env_variables_for_instance(),
         ],
     }
 
@@ -235,7 +281,7 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
             "id": TEMPLATE_ID,
             "iri": f"/instances/templates/{TEMPLATE_ID}",
             "required_image": IMAGE,
-            "note": "Template must point at V2 image tag 0.1.4 before real execution.",
+            "note": "Template must point at V2 image tag 0.1.5 before real execution.",
         },
         "inference_gate": {
             "endpoint": f"POST {INFERENCE_ENDPOINT}",
@@ -248,7 +294,8 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
             "runs_inference": status == "succeeded",
         },
         "payload_dryrun": inference_payload(args.allow_oom_fallback),
-        "instance_payload_dryrun": smoke.redact_value("", runtime_payload(args.instance_market or "<selected_from_market_api>")),
+        "r2_env_local_check": data.get("r2_env_local_check", local_r2_env_presence()),
+        "instance_payload_dryrun": redact_instance_payload(runtime_payload(args.instance_market or "<selected_from_market_api>")),
         "gpu_selection_policy": gpu_policies.select_market([], GPU_POLICY),
         "resolution_policy": {
             **gpu_policies.resolution_report("inference", GPU_POLICY),
@@ -303,6 +350,8 @@ def run(args: argparse.Namespace) -> int:
     started_monotonic = time.monotonic()
     try:
         execute_allowed = args.execute and args.confirm_start and args.confirm_inference and args.confirm_delete
+        load_local_env()
+        data["r2_env_local_check"] = local_r2_env_presence()
         print(f"[{TEST_ID}] START dry_run={str(not execute_allowed).lower()} template_id={TEMPLATE_ID}")
         print(f"[{TEST_ID}] image_required={IMAGE}")
         print(f"[{TEST_ID}] gpu_policy={GPU_POLICY} target_resolution=1080x1080")
@@ -323,11 +372,19 @@ def run(args: argparse.Namespace) -> int:
             return 0
 
         with timer.phase("load_auth"):
-            smoke.load_repo_dotenv()
+            load_local_env()
             api_key = os.getenv(smoke.API_KEY_ENV, "")
             base_url = os.getenv(smoke.BASE_URL_ENV, smoke.DEFAULT_BASE_URL)
+            data["r2_env_local_check"] = local_r2_env_presence()
         if not api_key:
             status = "missing_api_key"
+            write_json(REPORT_PATH, build_report(args, status, data))
+            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
+            return 1
+        missing_r2 = missing_local_r2_env()
+        if missing_r2:
+            status = "missing_local_r2_env"
+            data["missing_local_r2_env"] = missing_r2
             write_json(REPORT_PATH, build_report(args, status, data))
             print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
             return 1

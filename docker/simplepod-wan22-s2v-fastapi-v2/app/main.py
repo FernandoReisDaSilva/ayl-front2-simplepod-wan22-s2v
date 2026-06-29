@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 
-from .r2_client import r2_env_presence, r2_env_ready
+from .r2_client import r2_env_alias_presence, r2_env_ready
 from .reporting import file_facts, now_iso, stub_final_report
 from .settings import SERVICE_NAME, SERVICE_VERSION, get_settings, is_secret_key
 from .wan22_s2v_runner import run_wan22_s2v_single_job
@@ -277,7 +277,7 @@ def models() -> dict:
         "timestamp": now_iso(),
         "simplepod_models_root": file_facts(settings.simplepod_models_root),
         "wan22_s2v_model_dir": file_facts(settings.wan22_s2v_model_dir),
-        "r2_env_present_redacted": r2_env_presence(),
+        "r2_env_present_redacted": r2_env_alias_presence(),
         "r2_client_configured": r2_env_ready(),
         "no_downloads_attempted": True,
     }
@@ -415,7 +415,7 @@ def run_wan22_s2v_job(payload: dict[str, Any]) -> dict:
             status_code=409,
             detail={
                 "message": "R2 env is not configured for input/output.",
-                "r2_env_present_redacted": r2_env_presence(),
+                "r2_env_present_redacted": r2_env_alias_presence(),
             },
         )
     report = run_wan22_s2v_single_job(job_payload)
