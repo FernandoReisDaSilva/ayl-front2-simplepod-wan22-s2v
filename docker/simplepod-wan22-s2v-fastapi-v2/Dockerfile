@@ -4,7 +4,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     SIMPLEPOD_MODELS_ROOT=/mnt/ayl_models \
     WAN22_S2V_MODEL_DIR=/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B \
-    AYL_IMAGE_TAG=0.1.0
+    HF_HOME=/mnt/ayl_models/caches/huggingface \
+    AYL_IMAGE_TAG=0.1.1
 
 WORKDIR /opt/ayl-simplepod-wan22-s2v-fastapi-v2
 

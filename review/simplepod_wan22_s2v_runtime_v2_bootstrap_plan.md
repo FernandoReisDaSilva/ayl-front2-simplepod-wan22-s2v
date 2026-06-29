@@ -63,7 +63,7 @@ Motivo: validar import de `torch` e visibilidade CUDA no SimplePod antes de inst
 Disparo manual:
 
 ```text
-GitHub Actions -> Build SimplePod Wan2.2 S2V FastAPI V2 -> Run workflow -> image_tag=0.1.0
+GitHub Actions -> Build SimplePod Wan2.2 S2V FastAPI V2 -> Run workflow -> image_tag=0.1.1
 ```
 
 ## Check GHCR
@@ -108,3 +108,60 @@ Valida:
 - report registra se `/mnt/ayl_models` existe;
 - report registra env R2 como booleans/redigido, sem segredos;
 - instancia deletada ao final.
+
+## Wan2.2 S2V Weights Download Gate
+
+Status: preparado em dry-run. Execucao real ainda pendente de imagem V2 `0.1.1` publicada e template `25114` apontando para essa tag.
+
+Motivo para nova tag:
+
+- a tag V2 `0.1.0` validou FastAPI, torch/CUDA e Network Drive;
+- a tag V2 `0.1.0` nao tinha endpoint interno para download controlado de pesos;
+- a tag V2 `0.1.1` adiciona `huggingface_hub[cli]` e `POST /admin/download-wan22-s2v-weights`.
+
+Endpoint novo:
+
+```text
+POST /admin/download-wan22-s2v-weights
+```
+
+Guardas:
+
+- exige env `AYL_ENABLE_ADMIN_DOWNLOADS=1` no container;
+- exige payload `confirm_download=DOWNLOAD_WAN22_S2V_WEIGHTS`;
+- baixa somente para `WAN22_S2V_MODEL_DIR`;
+- nao executa inferencia;
+- nao gera video;
+- nao imprime segredos.
+
+Plano de download:
+
+```text
+repo_id=Wan-AI/Wan2.2-S2V-14B
+target_dir=/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B
+hf_home=/mnt/ayl_models/caches/huggingface
+```
+
+Comando equivalente dentro do container:
+
+```bash
+huggingface-cli download Wan-AI/Wan2.2-S2V-14B --local-dir /mnt/ayl_models/wan2.2/Wan2.2-S2V-14B
+```
+
+Script do gate:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_download_wan22_s2v_weights_v1.py
+```
+
+Execucao real futura:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_download_wan22_s2v_weights_v1.py --execute --confirm-start --confirm-download --confirm-delete
+```
+
+Report:
+
+```text
+logs/simplepod_wan22_s2v_weights_download_v1.json
+```

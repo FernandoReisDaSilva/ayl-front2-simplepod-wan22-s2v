@@ -1269,3 +1269,60 @@ git diff --check
 - R2 fica apenas como I/O.
 - Network Drive passa a ser o local de pesos/cache.
 - FastAPI propria substitui ComfyUI somente apos validacao incremental.
+
+## SimplePod V2 Weights Download Gate
+
+Status: gate preparado em dry-run para baixar pesos Wan2.2 S2V no Network Drive, sem inferencia.
+
+Contexto validado:
+
+- SimplePod V2 smoke aprovado;
+- CUDA visivel com `torch_import_status=ok`;
+- `/mnt/ayl_models` existe no container;
+- modelo ainda ausente em `/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B`.
+
+Decisao de imagem:
+
+- nova imagem V2 tag `0.1.1` e necessaria;
+- motivo: a tag `0.1.0` nao possui endpoint interno de download;
+- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.1`.
+
+Endpoint administrativo adicionado:
+
+```text
+POST /admin/download-wan22-s2v-weights
+```
+
+Guardas:
+
+- exige `AYL_ENABLE_ADMIN_DOWNLOADS=1`;
+- exige `confirm_download=DOWNLOAD_WAN22_S2V_WEIGHTS`;
+- restringe destino a `WAN22_S2V_MODEL_DIR`;
+- registra inventario leve antes/depois;
+- nao roda inferencia;
+- nao gera video;
+- nao imprime segredos.
+
+Comando equivalente dentro do container:
+
+```bash
+huggingface-cli download Wan-AI/Wan2.2-S2V-14B --local-dir /mnt/ayl_models/wan2.2/Wan2.2-S2V-14B
+```
+
+Script local:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_download_wan22_s2v_weights_v1.py
+```
+
+Execucao real futura:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_download_wan22_s2v_weights_v1.py --execute --confirm-start --confirm-download --confirm-delete
+```
+
+Report:
+
+```text
+logs/simplepod_wan22_s2v_weights_download_v1.json
+```

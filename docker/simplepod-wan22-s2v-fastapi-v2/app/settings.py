@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 SERVICE_NAME = "ayl-simplepod-wan22-s2v-fastapi-v2"
-SERVICE_VERSION = "0.1.0"
+SERVICE_VERSION = "0.1.1"
 
 R2_ENV_KEYS = (
     "R2_ENDPOINT",
@@ -19,6 +19,10 @@ APP_ENV_KEYS = (
     "WAN22_S2V_MODEL_DIR",
     "AYL_IMAGE_TAG",
     "AYL_MARKER_NONCE",
+    "AYL_ENABLE_ADMIN_DOWNLOADS",
+    "HF_HOME",
+    "HF_TOKEN",
+    "HUGGING_FACE_HUB_TOKEN",
     *R2_ENV_KEYS,
 )
 
