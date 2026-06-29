@@ -435,21 +435,31 @@ Verificacao local de manifest GHCR, sem baixar camadas da imagem:
 python3 scripts/simplepod/temp_check_ghcr_image_manifest_v1.py
 ```
 
+O checker implementa o fluxo anonimo correto do registry:
+
+1. solicita o manifest;
+2. se receber `401`, le o header `WWW-Authenticate`;
+3. extrai `realm`, `service` e `scope`;
+4. solicita token anonimo ao `realm`;
+5. repete o request do manifest com `Authorization: Bearer <token>`.
+
+O token anonimo nao e salvo no report.
+
 Report local:
 
 ```text
 logs/simplepod_ghcr_image_manifest_v1.json
 ```
 
-Status esperado antes do publish:
+Status finais possiveis:
 
-- `image_tag_not_found`, se o pacote/tag ainda nao existir publicamente;
-- ou `image_tag_requires_auth_or_package_private`, se o GHCR exigir autenticacao para metadata.
+- `image_tag_found`
+- `image_tag_not_found`
+- `image_tag_private_or_auth_required`
+- `ghcr_auth_challenge_parse_failed`
+- `ghcr_token_request_failed`
 
-Status esperado depois do publish, quando a imagem/tag estiver acessivel:
-
-- `image_tag_found`;
-- o report deve incluir `Docker-Content-Digest` quando o GHCR retornar esse header.
+Antes do publish, o resultado esperado e `image_tag_not_found` ou `image_tag_private_or_auth_required`, dependendo de como o GHCR expuser o pacote/tag. Depois do publish publico/acessivel, o resultado esperado e `image_tag_found`; o report deve incluir `Docker-Content-Digest` quando o GHCR retornar esse header.
 
 Guardrails:
 
@@ -459,6 +469,206 @@ Guardrails:
 - nao rodar inferencia;
 - nao incluir segredos SimplePod/R2 no workflow;
 - manter `scripts/simplepod/temp_create_simplepod_template_v1.py` pronto, mas sem executar ate a imagem existir.
+
+## Runtime smoke gate
+
+Status preparado para iniciar a primeira instancia SimplePod somente quando houver confirmacao explicita. Objetivo: subir a imagem FastAPI, validar endpoints leves e encerrar com seguranca, sem baixar pesos e sem inferencia.
+
+Template real criado:
+
+```text
+template_id=25114
+template_name=ayl-wan22-s2v-fastapi-v1
+image=ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v1:0.1.0
+```
+
+Volume ativo planejado:
+
+```text
+name=ayl_models_wan22_s2v_v1
+datacenter=EU-PL-01
+mount_path=/mnt/ayl_models
+```
+
+Endpoints REST identificados na documentacao SimplePod:
+
+```text
+GET /instances/market/list?rentalStatus=active
+POST /instances
+GET /instances/{id}
+DELETE /instances/{id}
+```
+
+Port mapping: a documentacao informa que `GET /instances/{id}` e `GET /instances/list` retornam o campo `ports`, incluindo `proxyUrl`, usado para chegar na porta publica.
+
+Body documentado para `POST /instances`:
+
+- `gpuCount`
+- `instanceMarket`
+- `instanceTemplate`
+- `startScript`
+- `envVariables`
+
+Nao foi encontrado campo documentado no body de `POST /instances` para anexar volume/network drive. O report do script registra `api_attach_status=not_documented_in_POST_/instances_body`; se o SimplePod exigir selecao explicita do Network Drive, isso deve ser feito no painel/template/UI antes do start real.
+
+Script:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_runtime_smoke_v1.py
+```
+
+Execucao real futura exige as duas confirmacoes:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_runtime_smoke_v1.py --execute --confirm-start --confirm-delete
+```
+
+Modo curto de investigacao de porta/proxy, sem chamar `/health` quando nao houver URL publica:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_runtime_smoke_v1.py --execute --confirm-start --inspect-only --confirm-delete
+```
+
+Payload dry-run:
+
+```json
+{
+  "gpuCount": 1,
+  "instanceMarket": "<selected_from_GET_/instances/market/list>",
+  "instanceTemplate": "/instances/templates/25114",
+  "startScript": "uvicorn app.main:app --host 0.0.0.0 --port 8000",
+  "envVariables": [
+    {
+      "name": "SIMPLEPOD_MODELS_ROOT",
+      "value": "/mnt/ayl_models"
+    },
+    {
+      "name": "WAN22_S2V_MODEL_DIR",
+      "value": "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B"
+    },
+    {
+      "name": "AYL_RUNTIME_SMOKE_ONLY",
+      "value": "1"
+    },
+    {
+      "name": "PYTHONUNBUFFERED",
+      "value": "1"
+    }
+  ]
+}
+```
+
+FastAPI smoke endpoints:
+
+```text
+GET /health
+GET /gpu
+GET /models
+```
+
+Report local:
+
+```text
+logs/simplepod_runtime_smoke_v1.json
+```
+
+Diagnostico apos primeiro runtime smoke real:
+
+- instancia criada: `108208`
+- delete: `DELETE /instances/108208` retornou `204`
+- `GET /instances/{id}` retornou `200` repetidamente
+- `public_api_base_url` ficou vazio
+- `api_readiness`: `blocked_no_proxy_url_for_port_8000`
+
+Hipotese mais provavel ate a proxima inspecao: o runtime criou a instancia, mas a API nao retornou `proxyUrl` para a porta `8000` no formato esperado. As causas candidatas sao, nesta ordem:
+
+1. port mapping nao gerado para `8000`;
+2. `proxyUrl` existe em outro campo/nivel e o extractor antigo nao capturou;
+3. template precisa de `exposePortMappings` em vez de somente `exposePorts`;
+4. container ainda nao estava pronto, embora `GET /instances/{id}` tenha respondido `200` em todas as leituras;
+5. necessidade de flag de servico HTTP/Jupyter no template, se o SimplePod usar isso para publicar URLs.
+
+O script foi atualizado para salvar no report uma versao redigida de `GET /instances/{id}` com:
+
+- top-level keys;
+- campos seguros relacionados a `ports`, `proxy`, `expose`, `network`, `status` e `state`;
+- candidatos de URL publica;
+- resumo seguro de `GET /instances/list` quando necessario.
+
+Diagnostico do modo `inspect-only`:
+
+```text
+ports.direct[2].srcPort = 8000
+ports.direct[2].destPort = 20008
+ports.direct[2].ip = 194.93.49.14
+ports.direct[2].url = ""
+ports.proxy[2].url = "closed"
+```
+
+Correcao aplicada ao extractor:
+
+- procurar primeiro `ports.direct` onde `srcPort == 8000`;
+- ignorar `srcPort="0console"`;
+- se `url` vier vazio, montar `http://{ip}:{destPort}`;
+- ignorar `ports.proxy` quando `url == "closed"`;
+- registrar `selected_api_port_mapping` no report.
+
+Mapping esperado para a API FastAPI observado no inspect:
+
+```json
+{
+  "source": "ports.direct.ip_destPort",
+  "srcPort": 8000,
+  "destPort": "20008",
+  "ip": "194.93.49.14",
+  "service": "PORT-8000",
+  "protocol": "unknown",
+  "url": "",
+  "selected_url": "http://194.93.49.14:20008"
+}
+```
+
+Guardrails:
+
+- dry-run por padrao: sim
+- start real exige `--execute --confirm-start --confirm-delete`
+- delete/encerramento ao final exige `--confirm-delete`
+- escolher GPU de menor custo observado pela API somente em execucao real
+- custo estimado so deve ser registrado se a API retornar preco/oferta
+- baixar pesos: nao
+- rodar inferencia: nao
+- imprimir segredos: nao
+
+## Runtime V2 bootstrap gate
+
+Novo bloco preparado em:
+
+```text
+review/simplepod_wan22_s2v_runtime_v2_bootstrap_plan.md
+```
+
+Imagem/tag alvo V2:
+
+```text
+ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.0
+```
+
+Arquivos criados:
+
+```text
+docker/simplepod-wan22-s2v-fastapi-v2/
+.github/workflows/build-simplepod-wan22-s2v-fastapi-v2.yml
+scripts/simplepod/temp_check_ghcr_image_manifest_v2.py
+scripts/simplepod/temp_simplepod_runtime_smoke_v2.py
+```
+
+Objetivo do V2: validar runtime com `torch`/CUDA, `/mnt/ayl_models` e env R2 redigida, sem baixar pesos e sem inferencia.
+
+Execucao real do smoke V2 fica bloqueada ate existir template V2:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_runtime_smoke_v2.py --template-id <TEMPLATE_ID_V2> --execute --confirm-start --confirm-delete
+```
 
 ## R2 I/O
 
