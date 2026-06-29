@@ -20,7 +20,7 @@ Preparar a imagem/runtime V2 para validar bootstrap de Wan2.2 S2V no SimplePod s
 Imagem alvo:
 
 ```text
-ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.0
+ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.2
 ```
 
 Docker root:
@@ -63,7 +63,7 @@ Motivo: validar import de `torch` e visibilidade CUDA no SimplePod antes de inst
 Disparo manual:
 
 ```text
-GitHub Actions -> Build SimplePod Wan2.2 S2V FastAPI V2 -> Run workflow -> image_tag=0.1.1
+GitHub Actions -> Build SimplePod Wan2.2 S2V FastAPI V2 -> Run workflow -> image_tag=0.1.2
 ```
 
 ## Check GHCR
@@ -111,13 +111,14 @@ Valida:
 
 ## Wan2.2 S2V Weights Download Gate
 
-Status: preparado em dry-run. Execucao real ainda pendente de imagem V2 `0.1.1` publicada e template `25114` apontando para essa tag.
+Status: preparado em dry-run. Execucao real agora exige imagem V2 `0.1.2` publicada e template `25114` apontando para essa tag.
 
 Motivo para nova tag:
 
 - a tag V2 `0.1.0` validou FastAPI, torch/CUDA e Network Drive;
 - a tag V2 `0.1.0` nao tinha endpoint interno para download controlado de pesos;
-- a tag V2 `0.1.1` adiciona `huggingface_hub[cli]` e `POST /admin/download-wan22-s2v-weights`.
+- a tag V2 `0.1.1` adicionou `huggingface_hub[cli]` e `POST /admin/download-wan22-s2v-weights`;
+- a tag V2 `0.1.2` corrige travamento provavel do download, adiciona timeout por subprocesso e cria `GET /admin/verify-wan22-s2v-weights`.
 
 Endpoint novo:
 
@@ -133,6 +134,7 @@ Guardas:
 - nao executa inferencia;
 - nao gera video;
 - nao imprime segredos.
+- retorna JSON final mesmo em erro/timeout do subprocesso.
 
 Plano de download:
 
@@ -165,3 +167,149 @@ Report:
 ```text
 logs/simplepod_wan22_s2v_weights_download_v1.json
 ```
+
+### Correcao de Travamento
+
+Causa provavel: o endpoint anterior chamava `snapshot_download()` diretamente dentro da request HTTP, sem timeout proprio e sem subprocesso isolado. Se o Hub/cache/lock finalizasse o download mas prendesse a chamada, o cliente ficava aguardando indefinidamente e nao gravava report final.
+
+Correcao em `0.1.2`:
+
+- `POST /admin/download-wan22-s2v-weights` usa `subprocess.run()` com timeout explicito;
+- captura `returncode`, `stdout` e `stderr` truncados;
+- retorna `status=timeout` se o comando exceder o limite;
+- sempre calcula inventario do diretorio apos o comando;
+- o cliente tenta `GET /admin/verify-wan22-s2v-weights` se o request de download falhar/expirar;
+- o cliente grava report final e tenta delete em `finally`.
+
+Status possiveis do gate de download:
+
+- `succeeded`;
+- `succeeded_but_client_timeout`;
+- `failed_download`;
+- `failed_verify_after_download`;
+- `timeout`;
+- `interrupted_delete_attempted`;
+- `delete_failed_manual_required`.
+
+## Wan2.2 S2V Weights Verify Gate
+
+Endpoint:
+
+```text
+GET /admin/verify-wan22-s2v-weights
+```
+
+Guardas:
+
+- exige `AYL_ENABLE_ADMIN_DOWNLOADS=1` ou `AYL_ENABLE_ADMIN_VERIFY=1`;
+- nao baixa nada;
+- nao roda inferencia;
+- nao gera video;
+- nao imprime segredos.
+
+Verificacoes:
+
+- `path=/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B`;
+- `exists`;
+- `is_dir`;
+- `recursive_file_count`;
+- `recursive_total_size_bytes`;
+- `recursive_total_size_gb`;
+- principais `.safetensors` com tamanho;
+- arquivos de config/tokenizer/model index quando existirem.
+
+Script:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_verify_wan22_s2v_weights_v1.py
+```
+
+Execucao real futura:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_verify_wan22_s2v_weights_v1.py --execute --confirm-start --confirm-verify --confirm-delete
+```
+
+Report:
+
+```text
+logs/simplepod_wan22_s2v_weights_verify_v1.json
+```
+
+## Phase Timing
+
+Utilitario:
+
+```text
+scripts/simplepod/simplepod_phase_timing.py
+```
+
+Formato compacto de stdout:
+
+```text
+[00:00] START phase=market_selection
+[00:07] DONE phase=market_selection elapsed=00:07
+[02:14] START phase=wait_health
+[03:02] DONE phase=wait_health elapsed=00:48
+```
+
+Cada report registra por fase:
+
+- `phase_name`;
+- `started_at`;
+- `ended_at`;
+- `elapsed_seconds`;
+- `elapsed_hhmmss`;
+- `elapsed_mmss`.
+
+## SimplePod GPU Selection Policies
+
+Camada reutilizavel:
+
+```text
+scripts/simplepod/simplepod_gpu_policies.py
+```
+
+Policies:
+
+- `smoke_gpu_policy`: `rentalStatus=active`, `datacenter=EU-PL-01`, `gpuCount=1`, `order[pricePerGpu]=asc`, pick first.
+- `download_gpu_policy`: igual `smoke_gpu_policy`.
+- `first_inference_gpu_policy`: `rentalStatus=active`, `datacenter=EU-PL-01`, `gpuCount=1`, `gpuMemorySize>=24000`, `order[pricePerGpu]=asc`, pick first.
+- `production_single_job_policy`: `rentalStatus=active`, `datacenter=EU-PL-01`, `gpuCount=1`, `gpuMemorySize>=48000`, prefer `A6000`, `L40S`, `RTX 6000 Ada`, `order[pricePerGpu]=asc`, pick first.
+- `production_parallel_policy`: `rentalStatus=active`, `datacenter=EU-PL-01`, `gpuCount=1`, `gpuMemorySize>=90000`, prefer `RTX PRO 6000 Blackwell` ou `RTX 6000 Blackwell`, `order[pricePerGpu]=asc`, pick first.
+- `premium_batch_policy`: `rentalStatus=active`, `datacenter=EU-PL-01`, require `gpuModel` contendo `H100` ou `H200`, `order[pricePerGpu]=asc`, pick first.
+
+Nenhum script deve hardcodar um market id unico. O market pode ser passado manualmente apenas como override explicito; nesse caso o report marca o motivo como override e nao inventa GPU/preco.
+
+Todo report de selecao deve registrar:
+
+- selected policy;
+- selected market id;
+- `gpuModel`;
+- `gpuMemorySize`;
+- `pricePerGpu`;
+- datacenter;
+- reason selected;
+- rejected candidates summary.
+
+## Resolution Policy
+
+- `target_production_resolution`: `1080x1080`.
+- `fallback_resolution`: `960x960`.
+- smoke/download/check nao definem resolucao editorial.
+- `first_inference_gpu_policy` com `gpuMemorySize>=24000`: tentar `1080x1080` para clipe curto Maé 14.8s; se OOM, registrar fallback para `960x960`.
+- `production_single_job_policy` com `gpuMemorySize>=48000`: usar `1080x1080` como padrao.
+- `production_parallel_policy` com `gpuMemorySize>=90000`: usar `1080x1080` como padrao e permitir paralelismo controlado por fila/job slots.
+- Nao fazer upscale `960x960 -> 1080x1080` como padrao se `1080x1080` direto for estavel.
+
+Todo report de runtime/inferencia deve registrar:
+
+- `requested_resolution`;
+- `actual_generation_resolution`;
+- `fallback_used`;
+- `gpu_policy`;
+- `gpuModel`;
+- `gpuMemorySize`;
+- `runtime_seconds`;
+- `estimated_cost`;
+- `oom_or_error_status`.

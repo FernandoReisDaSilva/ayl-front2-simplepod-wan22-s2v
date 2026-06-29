@@ -1272,20 +1272,20 @@ git diff --check
 
 ## SimplePod V2 Weights Download Gate
 
-Status: gate preparado em dry-run para baixar pesos Wan2.2 S2V no Network Drive, sem inferencia.
+Status: gate preparado em dry-run para baixar pesos Wan2.2 S2V no Network Drive, sem inferencia. Apos execucao observada, os pesos aparentemente foram baixados; o proximo gate formal e verificacao do volume.
 
 Contexto validado:
 
 - SimplePod V2 smoke aprovado;
 - CUDA visivel com `torch_import_status=ok`;
 - `/mnt/ayl_models` existe no container;
-- modelo ainda ausente em `/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B`.
+- modelo agora aparenta existir em `/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B`, pendente de verificacao formal por endpoint.
 
 Decisao de imagem:
 
-- nova imagem V2 tag `0.1.1` e necessaria;
-- motivo: a tag `0.1.0` nao possui endpoint interno de download;
-- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.1`.
+- nova imagem V2 tag `0.1.2` e necessaria;
+- motivo: a tag `0.1.1` nao tinha timeout/subprocesso robusto nem endpoint formal de verificacao;
+- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.2`.
 
 Endpoint administrativo adicionado:
 
@@ -1325,4 +1325,161 @@ Report:
 
 ```text
 logs/simplepod_wan22_s2v_weights_download_v1.json
+```
+
+## SimplePod GPU Policy Layer
+
+Implementado em:
+
+```text
+scripts/simplepod/simplepod_gpu_policies.py
+```
+
+Policies operacionais:
+
+- `smoke_gpu_policy`: menor preco ativo em `EU-PL-01`, `gpuCount=1`.
+- `download_gpu_policy`: menor preco ativo em `EU-PL-01`, `gpuCount=1`.
+- `first_inference_gpu_policy`: menor preco ativo em `EU-PL-01`, `gpuCount=1`, `gpuMemorySize>=24000`.
+- `production_single_job_policy`: menor preco ativo em `EU-PL-01`, `gpuCount=1`, `gpuMemorySize>=48000`, preferindo `A6000`, `L40S`, `RTX 6000 Ada`.
+- `production_parallel_policy`: menor preco ativo em `EU-PL-01`, `gpuCount=1`, `gpuMemorySize>=90000`, preferindo `RTX PRO 6000 Blackwell` ou `RTX 6000 Blackwell`.
+- `premium_batch_policy`: menor preco ativo em `EU-PL-01`, `gpuModel` contendo `H100` ou `H200`.
+
+Regra de selecao:
+
+- nao hardcodar um market id unico;
+- montar query por policy;
+- ordenar por `pricePerGpu asc`;
+- escolher o primeiro candidato aceito;
+- registrar candidatos rejeitados resumidos.
+
+Campos obrigatorios de report:
+
+- selected policy;
+- selected market id;
+- `gpuModel`;
+- `gpuMemorySize`;
+- `pricePerGpu`;
+- datacenter;
+- reason selected;
+- rejected candidates summary.
+
+## SimplePod Resolution Policy
+
+Resolucao alvo de producao:
+
+```text
+1080x1080
+```
+
+Fallback:
+
+```text
+960x960
+```
+
+Regras:
+
+- smoke/download/check nao definem resolucao editorial;
+- `first_inference_gpu_policy` tenta `1080x1080` para Maé 14.8s e registra fallback para `960x960` em caso de OOM;
+- `production_single_job_policy` usa `1080x1080` como padrao;
+- `production_parallel_policy` usa `1080x1080` como padrao e paralelismo via fila/job slots;
+- nao usar upscale `960x960 -> 1080x1080` como padrao quando `1080x1080` direto for estavel.
+
+Campos de report para runtime/inferencia:
+
+- `requested_resolution`;
+- `actual_generation_resolution`;
+- `fallback_used`;
+- `gpu_policy`;
+- `gpuModel`;
+- `gpuMemorySize`;
+- `runtime_seconds`;
+- `estimated_cost`;
+- `oom_or_error_status`.
+
+## SimplePod Weight Download Instrumentation and Verify Gate
+
+Status: preparado em dry-run antes de retomar verificacao formal dos pesos no Network Drive.
+
+Causa provavel do travamento observado:
+
+- `POST /admin/download-wan22-s2v-weights` chamava `snapshot_download()` dentro da request HTTP;
+- nao havia timeout proprio do subprocesso;
+- se o download terminasse mas o Hub/cache/lock ficasse preso na finalizacao, o cliente aguardava indefinidamente;
+- nesse estado o script podia nao gravar report final, embora o volume ja tivesse recebido os pesos.
+
+Correcao em imagem V2 tag `0.1.2`:
+
+- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.2`;
+- `POST /admin/download-wan22-s2v-weights` usa `subprocess.run()` com timeout explicito;
+- captura `returncode`, `stdout` e `stderr` truncados;
+- retorna JSON com `status=timeout` quando exceder o limite;
+- sempre registra inventario do diretorio apos o comando;
+- cliente tenta `GET /admin/verify-wan22-s2v-weights` se o request de download expirar/falhar;
+- cliente grava report final em erro/interrupcao e tenta delete em `finally`.
+
+Status possiveis do gate de download:
+
+- `succeeded`;
+- `succeeded_but_client_timeout`;
+- `failed_download`;
+- `failed_verify_after_download`;
+- `timeout`;
+- `interrupted_delete_attempted`;
+- `delete_failed_manual_required`.
+
+Utilitario de tempo:
+
+```text
+scripts/simplepod/simplepod_phase_timing.py
+```
+
+Exemplo de stdout compacto:
+
+```text
+[00:00] START phase=market_selection
+[00:07] DONE phase=market_selection elapsed=00:07
+[02:14] START phase=wait_health
+[03:02] DONE phase=wait_health elapsed=00:48
+```
+
+Reports registram:
+
+- `phase_name`;
+- `started_at`;
+- `ended_at`;
+- `elapsed_seconds`;
+- `elapsed_hhmmss`;
+- `elapsed_mmss`.
+
+Endpoint de verificacao formal:
+
+```text
+GET /admin/verify-wan22-s2v-weights
+```
+
+Guardas:
+
+- exige `AYL_ENABLE_ADMIN_DOWNLOADS=1` ou `AYL_ENABLE_ADMIN_VERIFY=1`;
+- nao baixa pesos;
+- nao roda inferencia;
+- nao gera video;
+- nao imprime segredos.
+
+Script de verificacao:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_verify_wan22_s2v_weights_v1.py
+```
+
+Execucao real futura:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_verify_wan22_s2v_weights_v1.py --execute --confirm-start --confirm-verify --confirm-delete
+```
+
+Report:
+
+```text
+logs/simplepod_wan22_s2v_weights_verify_v1.json
 ```
