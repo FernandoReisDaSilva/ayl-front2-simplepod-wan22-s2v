@@ -20,7 +20,7 @@ Preparar a imagem/runtime V2 para validar bootstrap de Wan2.2 S2V no SimplePod s
 Imagem alvo:
 
 ```text
-ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.2
+ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.3
 ```
 
 Docker root:
@@ -63,7 +63,7 @@ Motivo: validar import de `torch` e visibilidade CUDA no SimplePod antes de inst
 Disparo manual:
 
 ```text
-GitHub Actions -> Build SimplePod Wan2.2 S2V FastAPI V2 -> Run workflow -> image_tag=0.1.2
+GitHub Actions -> Build SimplePod Wan2.2 S2V FastAPI V2 -> Run workflow -> image_tag=0.1.3
 ```
 
 ## Check GHCR
@@ -111,7 +111,7 @@ Valida:
 
 ## Wan2.2 S2V Weights Download Gate
 
-Status: preparado em dry-run. Execucao real agora exige imagem V2 `0.1.2` publicada e template `25114` apontando para essa tag.
+Status: preparado em dry-run. Execucao real agora deve usar a imagem V2 mais recente publicada e template `25114` apontando para essa tag.
 
 Motivo para nova tag:
 
@@ -313,3 +313,56 @@ Todo report de runtime/inferencia deve registrar:
 - `runtime_seconds`;
 - `estimated_cost`;
 - `oom_or_error_status`.
+
+## First Maé FR 14.8s 1080 Inference Gate
+
+Plano:
+
+```text
+review/simplepod_mae_fr_14_8s_1080_inference_plan_v1.md
+```
+
+Imagem alvo:
+
+```text
+ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.3
+```
+
+Motivo da tag `0.1.3`:
+
+- adiciona `POST /jobs/wan22-s2v/run`;
+- valida payload Maé FR 14.8s 1080;
+- exige `confirm_inference=RUN_WAN22_S2V_MAE_14_8S_1080`;
+- ainda nao integra o runner Wan2.2 S2V real;
+- nao gera placeholder.
+
+Script:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_run_mae_wan22_s2v_14_8s_1080_v1.py
+```
+
+Execucao real futura:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_run_mae_wan22_s2v_14_8s_1080_v1.py --execute --confirm-start --confirm-inference --confirm-delete
+```
+
+Policy:
+
+```text
+first_inference_gpu_policy
+```
+
+Regras:
+
+- `gpuMemorySize>=24000`;
+- `target_resolution=1080x1080`;
+- `fallback_resolution=960x960` somente se OOM;
+- RTX 3060 nao deve ser usada para inferencia real.
+
+Report:
+
+```text
+logs/simplepod_mae_wan22_s2v_14_8s_1080_inference_v1.json
+```

@@ -1283,9 +1283,9 @@ Contexto validado:
 
 Decisao de imagem:
 
-- nova imagem V2 tag `0.1.2` e necessaria;
-- motivo: a tag `0.1.1` nao tinha timeout/subprocesso robusto nem endpoint formal de verificacao;
-- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.2`.
+- nova imagem V2 tag `0.1.3` passa a ser o alvo operacional atual;
+- motivo: a tag `0.1.2` corrigiu timeout/subprocesso e verificacao formal; a tag `0.1.3` adiciona o gate controlado de inferencia;
+- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.3`.
 
 Endpoint administrativo adicionado:
 
@@ -1482,4 +1482,62 @@ Report:
 
 ```text
 logs/simplepod_wan22_s2v_weights_verify_v1.json
+```
+
+## First Maé FR 14.8s 1080 Inference Gate
+
+Plano detalhado:
+
+```text
+review/simplepod_mae_fr_14_8s_1080_inference_plan_v1.md
+```
+
+Imagem alvo:
+
+```text
+ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.3
+```
+
+Endpoint:
+
+```text
+POST /jobs/wan22-s2v/run
+```
+
+Status do endpoint:
+
+- controlado;
+- exige `confirm_inference=RUN_WAN22_S2V_MAE_14_8S_1080`;
+- valida payload e estado dos pesos;
+- ainda nao roda Wan2.2 S2V real;
+- nao gera placeholder.
+
+Script:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_run_mae_wan22_s2v_14_8s_1080_v1.py
+```
+
+Execucao real futura:
+
+```bash
+python3 scripts/simplepod/temp_simplepod_run_mae_wan22_s2v_14_8s_1080_v1.py --execute --confirm-start --confirm-inference --confirm-delete
+```
+
+Policy:
+
+```text
+first_inference_gpu_policy
+```
+
+Resolucao:
+
+- requested: `1080x1080`;
+- fallback: `960x960` apenas em OOM;
+- sem upscale padrao se 1080 direto ficar estavel.
+
+Report:
+
+```text
+logs/simplepod_mae_wan22_s2v_14_8s_1080_inference_v1.json
 ```

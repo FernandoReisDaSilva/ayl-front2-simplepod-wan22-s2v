@@ -17,10 +17,22 @@ REQUIRED_JOB_FIELDS = ("reference_image_key", "audio_key")
 OPTIONAL_JOB_FIELDS = ("output_video_key", "final_report_key", "prompt", "seed", "duration_seconds")
 WAN22_S2V_REPO_ID = "Wan-AI/Wan2.2-S2V-14B"
 DOWNLOAD_CONFIRMATION = "DOWNLOAD_WAN22_S2V_WEIGHTS"
+INFERENCE_CONFIRMATION = "RUN_WAN22_S2V_MAE_14_8S_1080"
 ADMIN_DOWNLOAD_ENV = "AYL_ENABLE_ADMIN_DOWNLOADS"
 ADMIN_VERIFY_ENV = "AYL_ENABLE_ADMIN_VERIFY"
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 7200
 OUTPUT_TRUNCATE_CHARS = 4000
+RUN_JOB_REQUIRED_FIELDS = (
+    "job_id",
+    "reference_image_key",
+    "audio_key",
+    "target_width",
+    "target_height",
+    "fps",
+    "target_duration_seconds",
+    "output_video_key",
+    "output_report_key",
+)
 
 
 def torch_probe() -> dict:
@@ -188,6 +200,58 @@ def validate_job_payload(payload: Any) -> dict:
     return payload
 
 
+def validate_run_job_payload(payload: Any) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Job body must be a JSON object.")
+    if payload.get("confirm_inference") != INFERENCE_CONFIRMATION:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Explicit inference confirmation is required.",
+                "required_field": "confirm_inference",
+                "expected_value": INFERENCE_CONFIRMATION,
+            },
+        )
+    missing = [field for field in RUN_JOB_REQUIRED_FIELDS if payload.get(field) in ("", None)]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Missing required Wan2.2 S2V run field(s).",
+                "missing": missing,
+                "required": list(RUN_JOB_REQUIRED_FIELDS),
+            },
+        )
+    expected_values = {
+        "job_id": "mae_fr_wan22_s2v_14_8s_1080_v1",
+        "target_width": 1080,
+        "target_height": 1080,
+        "fps": 16,
+        "target_duration_seconds": 14.8,
+    }
+    mismatches = {}
+    for key, expected in expected_values.items():
+        value = payload.get(key)
+        if isinstance(expected, float):
+            try:
+                matches = abs(float(value) - expected) < 0.001
+            except (TypeError, ValueError):
+                matches = False
+        else:
+            matches = value == expected
+        if not matches:
+            mismatches[key] = {"expected": expected, "received": value}
+    if mismatches:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Unexpected Maé first inference field(s).",
+                "mismatches": mismatches,
+            },
+        )
+    return payload
+
+
 @app.get("/health")
 def health() -> dict:
     return {
@@ -328,6 +392,50 @@ def verify_wan22_s2v_weights() -> dict:
         "inference_executed": False,
         "video_generated": False,
     }
+
+
+@app.post("/jobs/wan22-s2v/run")
+def run_wan22_s2v_job(payload: dict[str, Any]) -> dict:
+    job_payload = validate_run_job_payload(payload)
+    settings = get_settings()
+    model_inventory = directory_inventory(settings.wan22_s2v_model_dir)
+    gpu_status = torch_probe()
+    status = "blocked_real_inference_not_integrated"
+    report = {
+        "job_id": job_payload["job_id"],
+        "status": status,
+        "service": SERVICE_NAME,
+        "timestamp": now_iso(),
+        "message": "Wan2.2 S2V real inference runner is not integrated in this image. No placeholder output was generated.",
+        "reference_image_key": job_payload["reference_image_key"],
+        "audio_key": job_payload["audio_key"],
+        "requested_resolution": {
+            "width": job_payload["target_width"],
+            "height": job_payload["target_height"],
+        },
+        "actual_generation_resolution": None,
+        "fallback_used": False,
+        "fps": job_payload["fps"],
+        "target_duration_seconds": job_payload["target_duration_seconds"],
+        "output_video_key": job_payload["output_video_key"],
+        "output_report_key": job_payload["output_report_key"],
+        "r2_env_present_redacted": r2_env_presence(),
+        "r2_client_configured": r2_env_ready(),
+        "model_dir": {
+            "path": str(settings.wan22_s2v_model_dir),
+            "exists": model_inventory["exists"],
+            "is_dir": model_inventory["is_dir"],
+            "recursive_file_count": model_inventory["recursive_file_count"],
+            "recursive_total_size_gb": model_inventory["recursive_total_size_gb"],
+        },
+        "gpu": gpu_status,
+        "downloads_attempted": False,
+        "inference_executed": False,
+        "placeholder_generated": False,
+        "video_generated": False,
+        "r2_upload_attempted": False,
+    }
+    return report
 
 
 @app.post("/jobs/wan22-s2v")
