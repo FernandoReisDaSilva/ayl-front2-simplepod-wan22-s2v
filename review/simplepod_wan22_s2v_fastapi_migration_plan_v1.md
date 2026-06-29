@@ -1283,9 +1283,9 @@ Contexto validado:
 
 Decisao de imagem:
 
-- nova imagem V2 tag `0.1.3` passa a ser o alvo operacional atual;
-- motivo: a tag `0.1.2` corrigiu timeout/subprocesso e verificacao formal; a tag `0.1.3` adiciona o gate controlado de inferencia;
-- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.3`.
+- nova imagem V2 tag `0.1.4` passa a ser o alvo operacional atual;
+- motivo: a tag `0.1.3` adicionou o gate controlado; a tag `0.1.4` adiciona runner real single job Wan2.2 S2V;
+- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.4`.
 
 Endpoint administrativo adicionado:
 
@@ -1495,7 +1495,7 @@ review/simplepod_mae_fr_14_8s_1080_inference_plan_v1.md
 Imagem alvo:
 
 ```text
-ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.3
+ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.4
 ```
 
 Endpoint:
@@ -1506,10 +1506,12 @@ POST /jobs/wan22-s2v/run
 
 Status do endpoint:
 
-- controlado;
+- real single job;
 - exige `confirm_inference=RUN_WAN22_S2V_MAE_14_8S_1080`;
-- valida payload e estado dos pesos;
-- ainda nao roda Wan2.2 S2V real;
+- baixa inputs do R2;
+- usa pesos locais do Network Drive;
+- chama `app.wan22_s2v_generate_wrapper`;
+- envia MP4 e report final ao R2;
 - nao gera placeholder.
 
 Script:
@@ -1527,7 +1529,7 @@ python3 scripts/simplepod/temp_simplepod_run_mae_wan22_s2v_14_8s_1080_v1.py --ex
 Policy:
 
 ```text
-first_inference_gpu_policy
+production_single_job_policy
 ```
 
 Resolucao:
@@ -1536,8 +1538,50 @@ Resolucao:
 - fallback: `960x960` apenas em OOM;
 - sem upscale padrao se 1080 direto ficar estavel.
 
+VRAM:
+
+- marketplace seleciona `gpuMemorySize>=48000`;
+- runtime `/gpu` e sanity check em GiB, aceitando `runtime_vram_total_gib>=46.0`;
+- nao comparar `23.52 GiB` contra `24 GB` decimal como falha automatica em policies futuras;
+- para este primeiro gate Maé 1080, 24GB nao e permitido.
+
 Report:
 
 ```text
 logs/simplepod_mae_wan22_s2v_14_8s_1080_inference_v1.json
 ```
+
+## Production Session Scheduler Proposal
+
+Plano:
+
+```text
+review/simplepod_wan22_s2v_production_session_scheduler_plan_v1.md
+```
+
+Objetivo:
+
+- planejar throughput para varios lipsyncs por video;
+- usar GPUs 48GB/96GB sem OOM;
+- separar `single_job_runner`, `benchmark_runner`, `production_session_runner` e `adaptive_scheduler`;
+- descobrir `max_parallel_jobs` por benchmark, sem hardcode.
+
+Policies:
+
+- `production_single_job_policy >=48GB` para baseline e jobs isolados;
+- `production_parallel_policy >=90GB` para sessoes com concorrencia controlada;
+- `target_resolution=1080x1080`;
+- `fallback_resolution=960x960` apenas em OOM ou instabilidade.
+
+Recomendacao inicial:
+
+- 48GB: iniciar com `concurrency=1`;
+- 90GB/96GB: iniciar com `concurrency=1`, benchmarkar, depois testar `concurrency=2`;
+- `concurrency=3` somente se `peak_vram_gb <=85%` e outputs ficarem estaveis.
+
+Status:
+
+- somente proposta;
+- nao iniciar SimplePod;
+- nao rodar inferencia;
+- nao alterar scripts ativos.

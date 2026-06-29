@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_ghcr_image_manifest_v2.json"
 
 IMAGE_NAME = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2"
-IMAGE_TAG = "0.1.3"
+IMAGE_TAG = "0.1.4"
 MANIFEST_ACCEPT = ", ".join(
     [
         "application/vnd.oci.image.index.v1+json",

@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from .r2_client import r2_env_presence, r2_env_ready
 from .reporting import file_facts, now_iso, stub_final_report
 from .settings import SERVICE_NAME, SERVICE_VERSION, get_settings, is_secret_key
+from .wan22_s2v_runner import run_wan22_s2v_single_job
 
 
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_VERSION)
@@ -400,41 +401,27 @@ def run_wan22_s2v_job(payload: dict[str, Any]) -> dict:
     settings = get_settings()
     model_inventory = directory_inventory(settings.wan22_s2v_model_dir)
     gpu_status = torch_probe()
-    status = "blocked_real_inference_not_integrated"
-    report = {
-        "job_id": job_payload["job_id"],
-        "status": status,
-        "service": SERVICE_NAME,
-        "timestamp": now_iso(),
-        "message": "Wan2.2 S2V real inference runner is not integrated in this image. No placeholder output was generated.",
-        "reference_image_key": job_payload["reference_image_key"],
-        "audio_key": job_payload["audio_key"],
-        "requested_resolution": {
-            "width": job_payload["target_width"],
-            "height": job_payload["target_height"],
-        },
-        "actual_generation_resolution": None,
-        "fallback_used": False,
-        "fps": job_payload["fps"],
-        "target_duration_seconds": job_payload["target_duration_seconds"],
-        "output_video_key": job_payload["output_video_key"],
-        "output_report_key": job_payload["output_report_key"],
-        "r2_env_present_redacted": r2_env_presence(),
-        "r2_client_configured": r2_env_ready(),
-        "model_dir": {
-            "path": str(settings.wan22_s2v_model_dir),
-            "exists": model_inventory["exists"],
-            "is_dir": model_inventory["is_dir"],
-            "recursive_file_count": model_inventory["recursive_file_count"],
-            "recursive_total_size_gb": model_inventory["recursive_total_size_gb"],
-        },
-        "gpu": gpu_status,
-        "downloads_attempted": False,
-        "inference_executed": False,
-        "placeholder_generated": False,
-        "video_generated": False,
-        "r2_upload_attempted": False,
-    }
+    if not model_inventory["exists"] or not model_inventory["is_dir"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Wan2.2 S2V model directory is missing.",
+                "model_dir": str(settings.wan22_s2v_model_dir),
+                "model_inventory": model_inventory,
+            },
+        )
+    if not r2_env_ready():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "R2 env is not configured for input/output.",
+                "r2_env_present_redacted": r2_env_presence(),
+            },
+        )
+    report = run_wan22_s2v_single_job(job_payload)
+    report["service"] = SERVICE_NAME
+    report["timestamp"] = now_iso()
+    report["gpu"] = gpu_status
     return report
 
 

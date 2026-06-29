@@ -22,14 +22,16 @@ Preparar o primeiro gate de inferencia Wan2.2 S2V para Maé FR, 14.8s, 1080x1080
 Nova imagem necessaria: sim.
 
 ```text
-ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.3
+ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.4
 ```
 
 Motivo:
 
-- adiciona `POST /jobs/wan22-s2v/run`;
-- valida payload e confirmacao de inferencia;
-- ainda nao integra o runner real Wan2.2 S2V;
+- substitui o bloqueio controlado por runner real single job Wan2.2 S2V;
+- baixa input image/audio do R2 para diretorio temporario da instancia;
+- chama o `generate.py` oficial Wan2.2 via wrapper;
+- sobe MP4 real para R2 quando a inferencia conclui;
+- sobe `final_report.json` para R2 em sucesso ou falha;
 - nao gera placeholder;
 - nao cria video falso.
 
@@ -48,10 +50,10 @@ confirm_inference=RUN_WAN22_S2V_MAE_14_8S_1080
 Modo atual:
 
 ```text
-controlled_not_implemented_no_placeholder
+real_single_job_no_scheduler
 ```
 
-O endpoint valida payload, GPU, R2 env e inventario dos pesos, mas retorna `blocked_real_inference_not_integrated` ate que o runner Wan2.2 S2V real seja incorporado. Nenhum output MP4 e gerado nesse modo.
+O endpoint valida payload, GPU, R2 env e inventario dos pesos, baixa os inputs do R2, roda inferencia real Wan2.2 S2V e envia MP4/report para R2. Scheduler e paralelismo continuam fora do escopo.
 
 ## Payload
 
@@ -68,16 +70,39 @@ O endpoint valida payload, GPU, R2 env e inventario dos pesos, mas retorna `bloc
   "target_duration_seconds": 14.8,
   "output_video_key": "tests/simplepod_wan22_s2v/outputs/mae_fr_wan22_s2v_14_8s_1080_v1.mp4",
   "output_report_key": "tests/simplepod_wan22_s2v/outputs/mae_fr_wan22_s2v_14_8s_1080_v1_final_report.json",
-  "confirm_inference": "RUN_WAN22_S2V_MAE_14_8S_1080"
+  "confirm_inference": "RUN_WAN22_S2V_MAE_14_8S_1080",
+  "allow_oom_fallback": false
 }
 ```
+
+## Runner Real
+
+Arquivo:
+
+```text
+docker/simplepod-wan22-s2v-fastapi-v2/app/wan22_s2v_runner.py
+```
+
+Wrapper:
+
+```text
+docker/simplepod-wan22-s2v-fastapi-v2/app/wan22_s2v_generate_wrapper.py
+```
+
+Comando base dentro do container:
+
+```bash
+python -m app.wan22_s2v_generate_wrapper --task s2v-14B --size 1080*1080 --ckpt_dir /mnt/ayl_models/wan2.2/Wan2.2-S2V-14B --offload_model True --convert_model_dtype --prompt "A natural, stable talking-head lip sync video of Maé speaking French." --image /tmp/ayl_wan22_s2v_jobs/mae_fr_wan22_s2v_14_8s_1080_v1/reference.png --audio /tmp/ayl_wan22_s2v_jobs/mae_fr_wan22_s2v_14_8s_1080_v1/audio.wav --save_file /tmp/ayl_wan22_s2v_jobs/mae_fr_wan22_s2v_14_8s_1080_v1/mae_fr_wan22_s2v_14_8s_1080_v1_1080x1080.mp4
+```
+
+O wrapper adiciona `1080*1080` ao mapa de tamanhos do Wan2.2 antes de chamar o `generate.py` oficial.
 
 ## GPU Policy
 
 Policy:
 
 ```text
-first_inference_gpu_policy
+production_single_job_policy
 ```
 
 Regras:
@@ -85,11 +110,21 @@ Regras:
 - `rentalStatus=active`;
 - `datacenter=EU-PL-01`;
 - `gpuCount=1`;
-- `gpuMemorySize>=24000`;
+- `gpuMemorySize>=48000`;
 - `order[pricePerGpu]=asc`;
 - pick first.
 
-RTX 3060 nao deve ser usada para inferencia real porque fica abaixo do minimo de 24GB VRAM.
+RTX 3060 e GPUs de 24GB nao devem ser usadas neste primeiro teste Maé 14.8s 1080x1080. O gate usa MB do marketplace como criterio de selecao e exige 48GB nominal.
+
+Normalizacao VRAM:
+
+- `marketplace_gpuMemorySize_mb`: valor do SimplePod marketplace, usado para selecao;
+- `nominal_vram_gb`: `marketplace_gpuMemorySize_mb / 1000`;
+- `runtime_vram_total_gib`: valor reportado por `/gpu` em GiB;
+- `policy_min_vram_mb`: `48000`;
+- `policy_min_runtime_vram_gib`: `46.0`.
+
+Nota: nao comparar GiB runtime contra GB decimal como falha automatica. Para 48GB nominal, aceitar runtime `>=46 GiB` como sanity check.
 
 ## Resolution Policy
 
@@ -143,7 +178,4 @@ Campos obrigatorios:
 - nao imprime segredos;
 - nao baixa pesos;
 - nao gera placeholder.
-
-## Proximo Bloqueio Real
-
-Para produzir MP4 real, a imagem precisa incorporar o runner Wan2.2 S2V oficial/validado, com download de inputs R2, inferencia, upload do MP4 e upload do report final. Ate la, o gate deve retornar bloqueio controlado em vez de gerar output falso.
+- nao implementa scheduler/paralelismo.

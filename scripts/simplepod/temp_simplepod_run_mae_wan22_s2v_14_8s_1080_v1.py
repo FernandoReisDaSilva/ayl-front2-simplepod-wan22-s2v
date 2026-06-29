@@ -19,11 +19,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_mae_wan22_s2v_14_8s_1080_inference_v1.json"
 
 TEMPLATE_ID = 25114
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.3"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.4"
 MODELS_ROOT = "/mnt/ayl_models"
 MODEL_DIR = "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B"
 HF_HOME = "/mnt/ayl_models/caches/huggingface"
-GPU_POLICY = "first_inference_gpu_policy"
+GPU_POLICY = "production_single_job_policy"
 VERIFY_ENDPOINT = "/admin/verify-wan22-s2v-weights"
 INFERENCE_ENDPOINT = "/jobs/wan22-s2v/run"
 CONFIRM_INFERENCE = "RUN_WAN22_S2V_MAE_14_8S_1080"
@@ -40,7 +40,7 @@ def write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def inference_payload() -> dict:
+def inference_payload(allow_oom_fallback: bool = False) -> dict:
     return {
         "job_id": JOB_ID,
         "character_id": "mae",
@@ -54,6 +54,7 @@ def inference_payload() -> dict:
         "output_video_key": OUTPUT_VIDEO_KEY,
         "output_report_key": OUTPUT_REPORT_KEY,
         "confirm_inference": CONFIRM_INFERENCE,
+        "allow_oom_fallback": allow_oom_fallback,
     }
 
 
@@ -147,14 +148,9 @@ def summarize_inference(value) -> dict:
     return {key: value.get(key) for key in keys if key in value}
 
 
-def gpu_has_required_memory(gpu_json: dict) -> bool:
-    if not isinstance(gpu_json, dict):
-        return False
-    vram = gpu_json.get("vram_total_gb")
-    try:
-        return float(vram) >= 24.0
-    except (TypeError, ValueError):
-        return False
+def gpu_passes_runtime_sanity(gpu_json: dict) -> bool:
+    report = gpu_policies.vram_policy_report(GPU_POLICY, {}, gpu_json)
+    return bool(report.get("runtime_sanity_passed"))
 
 
 def choose_market(args: argparse.Namespace, base_url: str, api_key: str, data: dict) -> str:
@@ -239,19 +235,19 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
             "id": TEMPLATE_ID,
             "iri": f"/instances/templates/{TEMPLATE_ID}",
             "required_image": IMAGE,
-            "note": "Template must point at V2 image tag 0.1.3 before real execution.",
+            "note": "Template must point at V2 image tag 0.1.4 before real execution.",
         },
         "inference_gate": {
             "endpoint": f"POST {INFERENCE_ENDPOINT}",
-            "endpoint_mode": "controlled_not_implemented_no_placeholder",
-            "requires_real_wan22_integration": True,
+            "endpoint_mode": "real_single_job_no_scheduler",
+            "requires_real_wan22_integration": False,
             "gpu_policy": GPU_POLICY,
-            "not_allowed_gpu_note": "RTX 3060 is below the >=24GB VRAM policy and must not be used for real inference.",
+            "not_allowed_gpu_note": "RTX 3060 and 24GB-class GPUs must not be used for this first Maé 1080 test; require production_single_job_policy >=48GB marketplace VRAM.",
             "downloads_model_weights": False,
             "placeholder_generated": False,
             "runs_inference": status == "succeeded",
         },
-        "payload_dryrun": inference_payload(),
+        "payload_dryrun": inference_payload(args.allow_oom_fallback),
         "instance_payload_dryrun": smoke.redact_value("", runtime_payload(args.instance_market or "<selected_from_market_api>")),
         "gpu_selection_policy": gpu_policies.select_market([], GPU_POLICY),
         "resolution_policy": {
@@ -261,6 +257,10 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
             "fallback_used": bool(data.get("fallback_used", False)),
             "oom_or_error_status": data.get("oom_or_error_status", ""),
         },
+        "vram_policy": data.get(
+            "vram_policy",
+            gpu_policies.vram_policy_report(GPU_POLICY, {}, None),
+        ),
         "runtime_seconds": runtime_seconds,
         "estimated_cost": gpu_policies.estimated_cost(selected if isinstance(selected, dict) else {}, runtime_seconds),
         "confirmations": {
@@ -382,8 +382,21 @@ def run(args: argparse.Namespace) -> int:
                 "http_status_code": gpu_result.get("http_status_code"),
                 "summary": smoke.summarize_api_response(gpu_result.get("json")),
             }
-            if not gpu_has_required_memory(gpu_result.get("json")):
-                status = "blocked_gpu_below_24gb_or_unknown"
+            selected_summary = data.get("market_selection", {}).get("selected", {}).get("selected_summary", {})
+            data["vram_policy"] = gpu_policies.vram_policy_report(
+                GPU_POLICY,
+                selected_summary,
+                gpu_result.get("json") if isinstance(gpu_result, dict) else {},
+            )
+            if not data["vram_policy"].get("marketplace_policy_passed"):
+                status = "blocked_marketplace_vram_below_48000mb_or_unknown"
+                data["oom_or_error_status"] = status
+                data["_status_for_finally"] = status
+                write_json(REPORT_PATH, build_report(args, status, data))
+                print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
+                return 1
+            if not gpu_passes_runtime_sanity(gpu_result.get("json")):
+                status = "blocked_runtime_vram_below_46gib_or_unknown"
                 data["oom_or_error_status"] = status
                 data["_status_for_finally"] = status
                 write_json(REPORT_PATH, build_report(args, status, data))
@@ -409,7 +422,11 @@ def run(args: argparse.Namespace) -> int:
                 return 1
 
             with timer.phase("run_inference_endpoint"):
-                inference_result = simple_post(proxy_url + INFERENCE_ENDPOINT, inference_payload(), args.inference_timeout_seconds)
+                inference_result = simple_post(
+                    proxy_url + INFERENCE_ENDPOINT,
+                    inference_payload(args.allow_oom_fallback),
+                    args.inference_timeout_seconds,
+                )
             body = inference_result.get("json")
             data["inference_result"] = {
                 "attempted": True,
@@ -424,7 +441,7 @@ def run(args: argparse.Namespace) -> int:
                 data["fallback_used"] = body.get("fallback_used", False)
                 data["oom_or_error_status"] = body.get("status", "")
 
-            status = "succeeded" if isinstance(body, dict) and body.get("video_generated") is True else "blocked_real_inference_not_integrated"
+            status = "succeeded" if isinstance(body, dict) and body.get("video_generated") is True else "failed_inference_endpoint"
             data["_status_for_finally"] = status
             data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
             write_json(REPORT_PATH, build_report(args, status, data))
@@ -471,6 +488,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-interval-seconds", type=int, default=5)
     parser.add_argument("--ready-timeout-seconds", type=int, default=300)
     parser.add_argument("--inference-timeout-seconds", type=int, default=7200)
+    parser.add_argument("--allow-oom-fallback", action="store_true", help="Allow one 960x960 retry only after real 1080 OOM.")
     return parser.parse_args()
 
 
