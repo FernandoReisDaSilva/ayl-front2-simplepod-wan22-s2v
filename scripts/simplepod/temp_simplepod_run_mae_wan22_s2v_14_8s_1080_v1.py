@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_mae_wan22_s2v_14_8s_1080_inference_v1.json"
 
 TEMPLATE_ID = 25114
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.5"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6"
 MODELS_ROOT = "/mnt/ayl_models"
 MODEL_DIR = "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B"
 HF_HOME = "/mnt/ayl_models/caches/huggingface"
@@ -281,7 +281,7 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
             "id": TEMPLATE_ID,
             "iri": f"/instances/templates/{TEMPLATE_ID}",
             "required_image": IMAGE,
-            "note": "Template must point at V2 image tag 0.1.5 before real execution.",
+            "note": "Template must point at V2 image tag 0.1.6 before real execution.",
         },
         "inference_gate": {
             "endpoint": f"POST {INFERENCE_ENDPOINT}",

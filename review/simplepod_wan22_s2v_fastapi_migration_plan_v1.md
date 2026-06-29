@@ -1283,9 +1283,9 @@ Contexto validado:
 
 Decisao de imagem:
 
-- nova imagem V2 tag `0.1.5` passa a ser o alvo operacional atual;
-- motivo: a tag `0.1.4` adicionou runner real single job; a tag `0.1.5` corrige R2 env injection/aliases e preflight R2;
-- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.5`.
+- nova imagem V2 tag `0.1.6` passa a ser o alvo operacional atual;
+- motivo: a tag `0.1.4` adicionou runner real single job; a tag `0.1.5` corrigiu R2 env injection/aliases e preflight R2, mas ficou bloqueada no boot por inconsistencia de import; a tag `0.1.6` corrige `r2_env_alias_presence` e adiciona validacao `import app.main`;
+- imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6`.
 
 Endpoint administrativo adicionado:
 
@@ -1495,7 +1495,7 @@ review/simplepod_mae_fr_14_8s_1080_inference_plan_v1.md
 Imagem alvo:
 
 ```text
-ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.5
+ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6
 ```
 
 Endpoint:
@@ -1523,6 +1523,8 @@ R2 env:
 - runtime bucket: `R2_BUCKET` ou `R2_BUCKET_NAME`;
 - runtime region: `R2_REGION`, fallback `auto`;
 - reports apenas `PRESENT/MISSING`, sem valores reais.
+- tag `0.1.5` bloqueada no boot por `ImportError` entre `main.py` e `r2_client.py`;
+- tag `0.1.6` corrige/importa `r2_env_alias_presence` de forma consistente e adiciona validacao `import app.main` no workflow antes do build/publish.
 
 Script:
 

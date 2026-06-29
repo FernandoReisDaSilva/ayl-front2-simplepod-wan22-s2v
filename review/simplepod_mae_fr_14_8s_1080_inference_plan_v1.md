@@ -22,7 +22,7 @@ Preparar o primeiro gate de inferencia Wan2.2 S2V para Maé FR, 14.8s, 1080x1080
 Nova imagem necessaria: sim.
 
 ```text
-ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.5
+ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6
 ```
 
 Motivo:
@@ -33,6 +33,7 @@ Motivo:
 - sobe MP4 real para R2 quando a inferencia conclui;
 - sobe `final_report.json` para R2 em sucesso ou falha;
 - corrige injecao de env R2 usando os nomes reais do `.env` local;
+- corrige o bloqueio de boot observado na tag `0.1.5`.
 - adiciona preflight R2 antes da inferencia;
 - nao gera placeholder;
 - nao cria video falso.
@@ -209,3 +210,25 @@ Campos obrigatorios:
 - nao baixa pesos;
 - nao gera placeholder.
 - nao implementa scheduler/paralelismo.
+
+## Boot Import Fix 0.1.6
+
+Status:
+
+- imagem `0.1.5` bloqueada antes do teste SimplePod por `ImportError`;
+- causa: `app/main.py` importava `r2_env_alias_presence`, mas a imagem publicada carregou um `app/r2_client.py` sem essa funcao;
+- correcao local: manter `from .r2_client import r2_env_alias_presence, r2_env_ready` e garantir `r2_env_alias_presence()` em `r2_client.py`;
+- nova imagem alvo: `ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6`.
+
+Validacao obrigatoria antes de publicar:
+
+```bash
+python3 - <<'PY'
+import sys
+sys.path.insert(0, "docker/simplepod-wan22-s2v-fastapi-v2")
+import app.main
+print("app.main import OK")
+PY
+```
+
+Essa validacao importa o app inteiro e pega inconsistencias entre modulos que `py_compile` isolado nao detecta.
