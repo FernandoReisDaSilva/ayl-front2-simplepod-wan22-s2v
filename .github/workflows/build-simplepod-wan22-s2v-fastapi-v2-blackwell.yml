@@ -1,0 +1,52 @@
+name: Build SimplePod Wan2.2 S2V FastAPI V2 Blackwell
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Experimental Blackwell image tag."
+        required: true
+        default: "0.2.0-blackwell"
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2
+
+jobs:
+  build:
+    name: Build and publish Blackwell experimental image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate FastAPI import graph
+        working-directory: docker/simplepod-wan22-s2v-fastapi-v2-blackwell
+        run: |
+          python -m pip install --no-cache-dir -r requirements.txt
+          python - <<'PY'
+          import app.main
+          print("app.main import OK")
+          PY
+
+      - name: Build and publish Blackwell image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker/simplepod-wan22-s2v-fastapi-v2-blackwell
+          file: docker/simplepod-wan22-s2v-fastapi-v2-blackwell/Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}
