@@ -1,6 +1,8 @@
 import uuid
+import importlib
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ ADMIN_DOWNLOAD_ENV = "AYL_ENABLE_ADMIN_DOWNLOADS"
 ADMIN_VERIFY_ENV = "AYL_ENABLE_ADMIN_VERIFY"
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 7200
 OUTPUT_TRUNCATE_CHARS = 4000
+WAN22_REPO_DIR = Path(os.getenv("WAN22_REPO_DIR", "/opt/Wan2.2"))
 RUN_JOB_REQUIRED_FIELDS = (
     "job_id",
     "reference_image_key",
@@ -142,6 +145,44 @@ def directory_inventory(path: Path) -> dict:
     inventory["safetensors_files"] = safetensors[:30]
     inventory["marker_files"] = marker_files
     return inventory
+
+
+def safe_import_module(module_name: str, extra_path: Path | None = None) -> dict:
+    try:
+        if extra_path is not None and str(extra_path) not in sys.path:
+            sys.path.insert(0, str(extra_path))
+        module = importlib.import_module(module_name)
+        return {
+            "status": "ok",
+            "module": module_name,
+            "module_file": str(getattr(module, "__file__", "") or ""),
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "module": module_name,
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:1000],
+        }
+
+
+def runtime_import_checks() -> dict:
+    wan_code_imports = {
+        "wan": safe_import_module("wan", WAN22_REPO_DIR),
+        "generate": safe_import_module("generate", WAN22_REPO_DIR),
+    }
+    runner_imports = {
+        "app.wan22_s2v_runner": safe_import_module("app.wan22_s2v_runner"),
+        "app.wan22_s2v_generate_wrapper": safe_import_module("app.wan22_s2v_generate_wrapper"),
+    }
+    wan_code_ok = any(item["status"] == "ok" for item in wan_code_imports.values())
+    runner_ok = all(item["status"] == "ok" for item in runner_imports.values())
+    return {
+        "wan_code_import_status": "ok" if wan_code_ok else "failed",
+        "runner_import_status": "ok" if runner_ok else "failed",
+        "wan_code_imports": wan_code_imports,
+        "runner_imports": runner_imports,
+    }
 
 
 def require_admin_download_enabled(payload: dict[str, Any]) -> None:
@@ -403,6 +444,65 @@ def verify_wan22_s2v_weights() -> dict:
         "downloads_attempted": False,
         "inference_executed": False,
         "video_generated": False,
+    }
+
+
+@app.get("/admin/verify-wan22-s2v-runtime")
+def verify_wan22_s2v_runtime() -> dict:
+    require_admin_verify_enabled()
+    settings = get_settings()
+    gpu_status = torch_probe()
+    models_root_inventory = directory_inventory(settings.simplepod_models_root)
+    model_inventory = directory_inventory(settings.wan22_s2v_model_dir)
+    import_checks = runtime_import_checks()
+    required_files_found = {
+        "safetensors_count": len(model_inventory["safetensors_files"]),
+        "has_safetensors": bool(model_inventory["safetensors_files"]),
+        "marker_file_count": len(model_inventory["marker_files"]),
+        "marker_files": model_inventory["marker_files"],
+    }
+    checks = {
+        "torch_import_ok": gpu_status.get("torch_import_status") == "ok",
+        "cuda_available": gpu_status.get("cuda_available") is True,
+        "models_root_exists": models_root_inventory["exists"] and models_root_inventory["is_dir"],
+        "wan22_model_dir_exists": model_inventory["exists"] and model_inventory["is_dir"],
+        "weights_file_count_positive": model_inventory["recursive_file_count"] > 0,
+        "weights_size_positive": model_inventory["recursive_total_size_bytes"] > 0,
+        "required_files_found": required_files_found["has_safetensors"],
+        "wan_code_import_ok": import_checks["wan_code_import_status"] == "ok",
+        "runner_import_ok": import_checks["runner_import_status"] == "ok",
+    }
+    return {
+        "status": "verified" if all(checks.values()) else "failed_runtime_verify",
+        "service": SERVICE_NAME,
+        "timestamp": now_iso(),
+        "torch_version": gpu_status.get("torch_version", ""),
+        "torch_cuda_version": gpu_status.get("torch_cuda_version", ""),
+        "device_name": gpu_status.get("device_name", ""),
+        "device_capability": gpu_status.get("device_capability"),
+        "gpu": gpu_status,
+        "models_root": str(settings.simplepod_models_root),
+        "models_root_exists": models_root_inventory["exists"],
+        "models_root_is_dir": models_root_inventory["is_dir"],
+        "wan22_model_dir": str(settings.wan22_s2v_model_dir),
+        "wan22_model_dir_exists": model_inventory["exists"],
+        "wan22_model_dir_is_dir": model_inventory["is_dir"],
+        "recursive_file_count": model_inventory["recursive_file_count"],
+        "recursive_total_size_bytes": model_inventory["recursive_total_size_bytes"],
+        "recursive_total_size_gb": model_inventory["recursive_total_size_gb"],
+        "required_files_found": required_files_found,
+        "safetensors_files": model_inventory["safetensors_files"],
+        "marker_files": model_inventory["marker_files"],
+        "sample_files": model_inventory["sample_files"],
+        "wan_code_import_status": import_checks["wan_code_import_status"],
+        "runner_import_status": import_checks["runner_import_status"],
+        "import_checks": import_checks,
+        "checks": checks,
+        "download_attempted": False,
+        "downloads_attempted": False,
+        "inference_executed": False,
+        "video_generated": False,
+        "placeholder_generated": False,
     }
 
 
