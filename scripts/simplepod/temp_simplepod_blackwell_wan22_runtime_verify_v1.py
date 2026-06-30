@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_blackwell_wan22_runtime_verify_v1.json"
 
 TEMPLATE_ID = 25138
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.1-blackwell"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.2-blackwell"
 STABLE_IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6"
 VERIFY_ENDPOINT = "/admin/verify-wan22-s2v-runtime"
 PORT = 8000
@@ -54,6 +54,16 @@ def summarize_verify(value) -> dict:
         "recursive_total_size_gb",
         "required_files_found",
         "wan_code_import_status",
+        "wan_code_import_error_type",
+        "wan_code_import_error_truncated",
+        "wan_code_import_traceback_tail",
+        "wan_code_import_attempted_modules",
+        "sys_path_tail",
+        "wan_repo_path_exists",
+        "wan_repo_path",
+        "cwd",
+        "python_version",
+        "installed_packages_relevant",
         "runner_import_status",
         "download_attempted",
         "inference_executed",
@@ -107,8 +117,8 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
         "template_id": TEMPLATE_ID,
         "image_ref": IMAGE,
         "stable_image_unchanged": STABLE_IMAGE,
-        "requires_new_image_tag": "0.2.1-blackwell",
-        "why_new_tag_needed": "Adds GET /admin/verify-wan22-s2v-runtime to the Blackwell experimental app.",
+        "requires_new_image_tag": "0.2.2-blackwell",
+        "why_new_tag_needed": "Adds detailed Wan2.2 import diagnostics to GET /admin/verify-wan22-s2v-runtime.",
         "selected_market_id": data.get("market_selection", {}).get("selected_market_id") or selected_summary.get("market_id", ""),
         "gpuModel": selected_summary.get("gpuModel", ""),
         "gpuMemorySize": selected_summary.get("gpuMemorySize"),

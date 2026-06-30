@@ -1,8 +1,10 @@
 import uuid
 import importlib
+import importlib.metadata
 import os
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,25 @@ RUN_JOB_REQUIRED_FIELDS = (
     "target_duration_seconds",
     "output_video_key",
     "output_report_key",
+)
+RELEVANT_PACKAGES = (
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "transformers",
+    "diffusers",
+    "accelerate",
+    "opencv-python-headless",
+    "imageio",
+    "imageio-ffmpeg",
+    "easydict",
+    "ftfy",
+)
+WAN_CODE_IMPORT_ATTEMPTED_MODULES = (
+    "wan",
+    "wan.configs",
+    "wan.modules",
+    "generate",
 )
 
 
@@ -158,18 +179,43 @@ def safe_import_module(module_name: str, extra_path: Path | None = None) -> dict
             "module_file": str(getattr(module, "__file__", "") or ""),
         }
     except Exception as exc:
+        traceback_lines = traceback.format_exc().splitlines()
         return {
             "status": "failed",
             "module": module_name,
             "error_type": type(exc).__name__,
             "error_truncated": str(exc)[:1000],
+            "traceback_tail": traceback_lines[-12:],
         }
+
+
+def installed_packages_relevant() -> dict:
+    packages = {}
+    for package_name in RELEVANT_PACKAGES:
+        try:
+            packages[package_name] = {
+                "status": "installed",
+                "version": importlib.metadata.version(package_name),
+            }
+        except importlib.metadata.PackageNotFoundError:
+            packages[package_name] = {
+                "status": "missing",
+                "version": "",
+            }
+        except Exception as exc:
+            packages[package_name] = {
+                "status": "error",
+                "version": "",
+                "error_type": type(exc).__name__,
+                "error_truncated": str(exc)[:500],
+            }
+    return packages
 
 
 def runtime_import_checks() -> dict:
     wan_code_imports = {
-        "wan": safe_import_module("wan", WAN22_REPO_DIR),
-        "generate": safe_import_module("generate", WAN22_REPO_DIR),
+        module_name: safe_import_module(module_name, WAN22_REPO_DIR)
+        for module_name in WAN_CODE_IMPORT_ATTEMPTED_MODULES
     }
     runner_imports = {
         "app.wan22_s2v_runner": safe_import_module("app.wan22_s2v_runner"),
@@ -177,8 +223,16 @@ def runtime_import_checks() -> dict:
     }
     wan_code_ok = any(item["status"] == "ok" for item in wan_code_imports.values())
     runner_ok = all(item["status"] == "ok" for item in runner_imports.values())
+    first_wan_failure = next(
+        (item for item in wan_code_imports.values() if item.get("status") == "failed"),
+        {},
+    )
     return {
         "wan_code_import_status": "ok" if wan_code_ok else "failed",
+        "wan_code_import_error_type": "" if wan_code_ok else first_wan_failure.get("error_type", ""),
+        "wan_code_import_error_truncated": "" if wan_code_ok else first_wan_failure.get("error_truncated", ""),
+        "wan_code_import_traceback_tail": [] if wan_code_ok else first_wan_failure.get("traceback_tail", []),
+        "wan_code_import_attempted_modules": list(WAN_CODE_IMPORT_ATTEMPTED_MODULES),
         "runner_import_status": "ok" if runner_ok else "failed",
         "wan_code_imports": wan_code_imports,
         "runner_imports": runner_imports,
@@ -487,6 +541,12 @@ def verify_wan22_s2v_runtime() -> dict:
         "wan22_model_dir": str(settings.wan22_s2v_model_dir),
         "wan22_model_dir_exists": model_inventory["exists"],
         "wan22_model_dir_is_dir": model_inventory["is_dir"],
+        "wan_repo_path": str(WAN22_REPO_DIR),
+        "wan_repo_path_exists": WAN22_REPO_DIR.exists(),
+        "cwd": os.getcwd(),
+        "python_version": sys.version,
+        "sys_path_tail": sys.path[-12:],
+        "installed_packages_relevant": installed_packages_relevant(),
         "recursive_file_count": model_inventory["recursive_file_count"],
         "recursive_total_size_bytes": model_inventory["recursive_total_size_bytes"],
         "recursive_total_size_gb": model_inventory["recursive_total_size_gb"],
@@ -495,6 +555,10 @@ def verify_wan22_s2v_runtime() -> dict:
         "marker_files": model_inventory["marker_files"],
         "sample_files": model_inventory["sample_files"],
         "wan_code_import_status": import_checks["wan_code_import_status"],
+        "wan_code_import_error_type": import_checks["wan_code_import_error_type"],
+        "wan_code_import_error_truncated": import_checks["wan_code_import_error_truncated"],
+        "wan_code_import_traceback_tail": import_checks["wan_code_import_traceback_tail"],
+        "wan_code_import_attempted_modules": import_checks["wan_code_import_attempted_modules"],
         "runner_import_status": import_checks["runner_import_status"],
         "import_checks": import_checks,
         "checks": checks,
