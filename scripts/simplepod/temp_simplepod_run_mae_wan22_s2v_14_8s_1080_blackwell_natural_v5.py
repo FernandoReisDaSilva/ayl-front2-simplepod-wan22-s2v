@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_mae_wan22_s2v_14_8s_1080_blackwell_natural_v5_inference_v1.json"
 
 TEMPLATE_ID = 25138
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.10-blackwell"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.11-blackwell"
 STABLE_TEMPLATE_ID = 25114
 STABLE_IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6"
 DATACENTER = "EU-PL-01"
@@ -138,6 +138,7 @@ def runtime_payload(instance_market: str) -> dict:
             {"name": "HF_HOME", "value": HF_HOME},
             {"name": "AYL_ENABLE_ADMIN_VERIFY", "value": "1"},
             {"name": "AYL_RUNTIME_VERSION", "value": "v2-blackwell-mae-natural-v5-inference"},
+            {"name": "AYL_SAFETENSORS_CUDA_TO_CPU_PATCH", "value": "1"},
             {"name": "PYTHONUNBUFFERED", "value": "1"},
             {"name": "TORCH_CUDA_ARCH_LIST", "value": "12.0"},
             *r2_env_variables_for_instance(),

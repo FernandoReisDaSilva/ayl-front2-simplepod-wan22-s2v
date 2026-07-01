@@ -450,6 +450,108 @@ def models() -> dict:
     }
 
 
+def safe_call(label: str, fn) -> dict:
+    try:
+        value = fn()
+        return {"status": "succeeded", "label": label, "result": value}
+    except Exception as exc:
+        traceback_lines = traceback.format_exc().splitlines()
+        return {
+            "status": "failed",
+            "label": label,
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:1000],
+            "traceback_tail": traceback_lines[-10:],
+        }
+
+
+def package_version(package_name: str) -> str:
+    try:
+        return importlib.metadata.version(package_name)
+    except Exception:
+        return ""
+
+
+def safetensors_device_check() -> dict:
+    gpu_status = torch_probe()
+    result = {
+        "status": "started",
+        "service": SERVICE_NAME,
+        "timestamp": now_iso(),
+        "torch": {
+            "torch_import_status": gpu_status.get("torch_import_status"),
+            "torch_version": gpu_status.get("torch_version", ""),
+            "torch_cuda_version": gpu_status.get("torch_cuda_version", ""),
+            "cuda_available": gpu_status.get("cuda_available"),
+            "device_name": gpu_status.get("device_name", ""),
+            "device_capability": gpu_status.get("device_capability"),
+        },
+        "versions": {
+            "safetensors": package_version("safetensors"),
+            "accelerate": package_version("accelerate"),
+        },
+        "downloads_model_weights": False,
+        "loads_full_model": False,
+        "inference_executed": False,
+        "video_generated": False,
+    }
+    try:
+        import torch
+        import safetensors
+        import safetensors.torch
+        from safetensors import safe_open
+    except Exception as exc:
+        result["status"] = "failed_import"
+        result["error_type"] = type(exc).__name__
+        result["error_truncated"] = str(exc)[:1000]
+        return result
+
+    test_path = Path("/tmp/ayl_safetensors_device_check.safetensors")
+    tensor_payload = {"tiny": torch.arange(4, dtype=torch.float32).reshape(2, 2)}
+    save_result = safe_call(
+        "safetensors.torch.save_file",
+        lambda: (safetensors.torch.save_file(tensor_payload, str(test_path)), {"path": str(test_path), "size_bytes": test_path.stat().st_size})[1],
+    )
+    result["save_file"] = save_result
+
+    def load_file_device(device: str) -> dict:
+        loaded = safetensors.torch.load_file(str(test_path), device=device)
+        tensor = loaded["tiny"]
+        return {"keys": sorted(loaded.keys()), "tensor_device": str(tensor.device), "shape": list(tensor.shape)}
+
+    def safe_open_device(device: str) -> dict:
+        with safe_open(str(test_path), framework="pt", device=device) as handle:
+            keys = list(handle.keys())
+            tensor = handle.get_tensor("tiny")
+        return {"keys": keys, "tensor_device": str(tensor.device), "shape": list(tensor.shape)}
+
+    result["load_file_cpu"] = safe_call("safetensors.torch.load_file(device='cpu')", lambda: load_file_device("cpu"))
+    result["load_file_cuda0"] = safe_call("safetensors.torch.load_file(device='cuda:0')", lambda: load_file_device("cuda:0"))
+    result["safe_open_cpu"] = safe_call("safetensors.safe_open(device='cpu')", lambda: safe_open_device("cpu"))
+    result["safe_open_cuda0"] = safe_call("safetensors.safe_open(device='cuda:0')", lambda: safe_open_device("cuda:0"))
+
+    result["monkeypatch_cuda_to_cpu_simulation"] = {
+        "enabled": True,
+        "load_file_cuda0_redirected": safe_call("patched load_file cuda:0->cpu", lambda: load_file_device("cpu")),
+        "safe_open_cuda0_redirected": safe_call("patched safe_open cuda:0->cpu", lambda: safe_open_device("cpu")),
+    }
+    cuda_checks = (result["load_file_cuda0"], result["safe_open_cuda0"])
+    cpu_checks = (result["load_file_cpu"], result["safe_open_cpu"])
+    if all(item["status"] == "succeeded" for item in cuda_checks):
+        result["status"] = "cuda_device_supported"
+    elif all(item["status"] == "succeeded" for item in cpu_checks):
+        result["status"] = "cuda_device_failed_cpu_ok"
+    else:
+        result["status"] = "failed_cpu_and_cuda"
+    return result
+
+
+@app.get("/admin/check-safetensors-device")
+def check_safetensors_device() -> dict:
+    require_admin_verify_enabled()
+    return safetensors_device_check()
+
+
 @app.post("/admin/download-wan22-s2v-weights")
 def download_wan22_s2v_weights(payload: dict[str, Any]) -> dict:
     require_admin_download_enabled(payload)
