@@ -552,6 +552,148 @@ def check_safetensors_device() -> dict:
     return safetensors_device_check()
 
 
+def find_wan22_diffusion_shard(model_dir: Path) -> Path | None:
+    candidates = sorted(model_dir.rglob("diffusion_pytorch_model-*.safetensors"))
+    return candidates[0] if candidates else None
+
+
+def tensor_slice_facts(handle, key: str) -> dict:
+    tensor_slice = handle.get_slice(key)
+    shape = list(tensor_slice.get_shape())
+    dtype = str(tensor_slice.get_dtype())
+    numel = 1
+    for dim in shape:
+        numel *= int(dim)
+    return {"key": key, "shape": shape, "dtype": dtype, "numel": numel}
+
+
+def safe_open_shard_facts(path: Path, device: str, max_tensor_numel: int = 262_144) -> dict:
+    from safetensors import safe_open
+
+    with safe_open(str(path), framework="pt", device=device) as handle:
+        keys = list(handle.keys())
+        metadata = handle.metadata()
+        key_facts = []
+        selected_key = ""
+        for key in keys:
+            facts = tensor_slice_facts(handle, key)
+            if len(key_facts) < 20:
+                key_facts.append(facts)
+            if not selected_key and facts["numel"] <= max_tensor_numel:
+                selected_key = key
+        tensor_result = {
+            "status": "skipped_no_small_tensor",
+            "max_tensor_numel": max_tensor_numel,
+        }
+        if selected_key:
+            tensor = handle.get_tensor(selected_key)
+            tensor_result = {
+                "status": "succeeded",
+                "key": selected_key,
+                "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype),
+                "device": str(tensor.device),
+                "numel": int(tensor.numel()),
+            }
+    return {
+        "keys_count": len(keys),
+        "sample_keys": keys[:20],
+        "metadata": metadata,
+        "sample_tensor_slices": key_facts,
+        "small_tensor_read": tensor_result,
+    }
+
+
+def wan22_safetensors_shard_check(allow_load_file_cpu: bool = False) -> dict:
+    settings = get_settings()
+    gpu_status = torch_probe()
+    model_dir = settings.wan22_s2v_model_dir
+    shard_path = find_wan22_diffusion_shard(model_dir)
+    result = {
+        "status": "started",
+        "service": SERVICE_NAME,
+        "timestamp": now_iso(),
+        "model_dir": str(model_dir),
+        "torch": {
+            "torch_import_status": gpu_status.get("torch_import_status"),
+            "torch_version": gpu_status.get("torch_version", ""),
+            "torch_cuda_version": gpu_status.get("torch_cuda_version", ""),
+            "cuda_available": gpu_status.get("cuda_available"),
+            "device_name": gpu_status.get("device_name", ""),
+            "device_capability": gpu_status.get("device_capability"),
+        },
+        "versions": {
+            "safetensors": package_version("safetensors"),
+            "accelerate": package_version("accelerate"),
+        },
+        "allow_load_file_cpu": allow_load_file_cpu,
+        "downloads_model_weights": False,
+        "loads_full_model": False,
+        "load_file_cuda_attempted": False,
+        "inference_executed": False,
+        "video_generated": False,
+    }
+    if shard_path is None:
+        result["status"] = "missing_diffusion_safetensors_shard"
+        result["shard"] = {
+            "exists": False,
+            "pattern": "diffusion_pytorch_model-*.safetensors",
+        }
+        return result
+
+    result["shard"] = {
+        "path": str(shard_path),
+        "relative_path": str(shard_path.relative_to(model_dir)) if shard_path.is_relative_to(model_dir) else str(shard_path),
+        "exists": shard_path.exists(),
+        "readable": os.access(shard_path, os.R_OK),
+        "size_bytes": shard_path.stat().st_size if shard_path.exists() else None,
+        "size_gb": round(shard_path.stat().st_size / (1024**3), 3) if shard_path.exists() else None,
+    }
+    result["safe_open_cpu"] = safe_call(
+        "safe_open(real shard, device='cpu')",
+        lambda: safe_open_shard_facts(shard_path, "cpu"),
+    )
+    result["safe_open_cuda0"] = safe_call(
+        "safe_open(real shard, device='cuda:0')",
+        lambda: safe_open_shard_facts(shard_path, "cuda:0"),
+    )
+    if allow_load_file_cpu:
+        def load_file_cpu() -> dict:
+            import safetensors.torch
+
+            loaded = safetensors.torch.load_file(str(shard_path), device="cpu")
+            sample = []
+            for key, tensor in list(loaded.items())[:10]:
+                sample.append({"key": key, "shape": list(tensor.shape), "dtype": str(tensor.dtype), "device": str(tensor.device)})
+            return {"keys_count": len(loaded), "sample_tensors": sample}
+
+        result["loads_full_model"] = True
+        result["load_file_cpu"] = safe_call("load_file(real shard, device='cpu')", load_file_cpu)
+    else:
+        result["load_file_cpu"] = {
+            "status": "skipped_requires_explicit_allow_load_file_cpu",
+            "reason": "Full shard load may be large; enable only for a dedicated diagnostic.",
+        }
+    result["load_file_cuda0"] = {
+        "status": "not_attempted_by_design",
+        "reason": "Full CUDA shard load is intentionally disabled.",
+    }
+
+    if result["safe_open_cpu"]["status"] != "succeeded":
+        result["status"] = "failed_safe_open_cpu"
+    elif result["safe_open_cuda0"]["status"] == "succeeded":
+        result["status"] = "cuda_safe_open_shard_supported"
+    else:
+        result["status"] = "cuda_safe_open_shard_failed_cpu_ok"
+    return result
+
+
+@app.get("/admin/check-wan22-safetensors-shard")
+def check_wan22_safetensors_shard(allow_load_file_cpu: bool = False) -> dict:
+    require_admin_verify_enabled()
+    return wan22_safetensors_shard_check(allow_load_file_cpu=allow_load_file_cpu)
+
+
 @app.post("/admin/download-wan22-s2v-weights")
 def download_wan22_s2v_weights(payload: dict[str, Any]) -> dict:
     require_admin_download_enabled(payload)
