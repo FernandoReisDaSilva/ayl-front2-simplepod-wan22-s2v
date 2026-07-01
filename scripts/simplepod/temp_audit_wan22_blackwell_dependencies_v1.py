@@ -9,6 +9,7 @@ weights, or running inference.
 from __future__ import annotations
 
 import ast
+import argparse
 import importlib
 import json
 import os
@@ -39,6 +40,7 @@ FOCUS_IMPORTS = {
     "accelerate": "accelerate",
     "av": "av",
     "cv2": "opencv-python-headless",
+    "dashscope": "dashscope",
     "decord": "decord",
     "diffusers": "diffusers",
     "easydict": "easydict",
@@ -52,6 +54,7 @@ FOCUS_IMPORTS = {
     "numpy": "numpy",
     "omegaconf": "omegaconf",
     "PIL": "Pillow",
+    "regex": "regex",
     "safetensors": "safetensors",
     "scipy": "scipy",
     "soundfile": "soundfile",
@@ -67,7 +70,6 @@ DEFERRED_OPTIONAL_PACKAGES = {
     "flash-attn",
     "hydra",
     "matplotlib",
-    "peft",
     "sam2",
 }
 
@@ -419,6 +421,185 @@ def import_status(module_name: str) -> dict[str, Any]:
         }
 
 
+def declared_import_modules(requirements: dict[str, Any], dockerfile_packages: dict[str, Any]) -> set[str]:
+    modules = set()
+    for package in requirements["packages"].values():
+        modules.add(str(package["import_name"]).split(".", 1)[0])
+    for package in dockerfile_packages.values():
+        modules.add(str(package["import_name"]).split(".", 1)[0])
+    return modules
+
+
+def run_generate_global_import_probe_once(wan_repo_path: Path, stub_top_modules: set[str], timeout: int = 30) -> dict[str, Any]:
+    code = r'''
+import importlib.abc
+import importlib.machinery
+import json
+import sys
+import traceback
+import types
+
+wan_repo = sys.argv[1]
+stub_tops = set(json.loads(sys.argv[2]))
+
+class Dummy:
+    def __mro_entries__(self, bases):
+        return ()
+    def __call__(self, *args, **kwargs):
+        return self
+    def __iter__(self):
+        return iter(())
+    def __bool__(self):
+        return False
+    def __len__(self):
+        return 0
+    def __getitem__(self, _key):
+        return self
+    def __getattr__(self, _name):
+        return self
+
+class StubLoader(importlib.abc.Loader):
+    def create_module(self, spec):
+        module = types.ModuleType(spec.name)
+        module.__file__ = "<stubbed_by_dependency_audit>"
+        module.__path__ = []
+        module.__package__ = spec.name
+        module.__all__ = []
+        def _getattr(_name):
+            value = Dummy()
+            setattr(module, _name, value)
+            return value
+        module.__getattr__ = _getattr
+        return module
+    def exec_module(self, module):
+        return None
+
+class StubFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        top = fullname.split(".", 1)[0]
+        if top in stub_tops:
+            return importlib.machinery.ModuleSpec(fullname, StubLoader(), is_package=True)
+        return None
+
+sys.meta_path.insert(0, StubFinder())
+sys.path.insert(0, wan_repo)
+
+try:
+    import generate  # noqa: F401
+    print(json.dumps({"status": "import_generate_ok"}))
+except ModuleNotFoundError as exc:
+    print(json.dumps({
+        "status": "missing_module",
+        "missing_module": exc.name,
+        "error_type": type(exc).__name__,
+        "error_truncated": str(exc)[:1000],
+        "traceback_tail": traceback.format_exc().splitlines()[-12:],
+    }))
+    raise SystemExit(2)
+except Exception as exc:
+    print(json.dumps({
+        "status": "failed_non_module_not_found",
+        "error_type": type(exc).__name__,
+        "error_truncated": str(exc)[:1000],
+        "traceback_tail": traceback.format_exc().splitlines()[-12:],
+    }))
+    raise SystemExit(3)
+'''
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                code,
+                str(wan_repo_path),
+                json.dumps(sorted(stub_top_modules)),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        return {
+            "status": "failed_probe_subprocess",
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:1000],
+        }
+    stdout = (completed.stdout or "").strip()
+    parsed = None
+    for line in reversed(stdout.splitlines()):
+        try:
+            parsed = json.loads(line)
+            break
+        except json.JSONDecodeError:
+            continue
+    return {
+        "status": parsed.get("status", "failed_unparseable_probe_output") if isinstance(parsed, dict) else "failed_unparseable_probe_output",
+        "returncode": completed.returncode,
+        "parsed": parsed,
+        "stdout_truncated": (completed.stdout or "")[-2000:],
+        "stderr_truncated": (completed.stderr or "")[-2000:],
+    }
+
+
+def run_generate_global_import_probe(
+    wan_repo_path: Path,
+    requirements: dict[str, Any],
+    dockerfile_packages: dict[str, Any],
+    max_iterations: int,
+) -> dict[str, Any]:
+    declared_packages = dict(requirements["packages"])
+    declared_packages.update(dockerfile_packages)
+    declared_names = set(declared_packages)
+    stub_top_modules = declared_import_modules(requirements, dockerfile_packages)
+    missing_modules: list[str] = []
+    iterations: list[dict[str, Any]] = []
+
+    for index in range(1, max_iterations + 1):
+        result = run_generate_global_import_probe_once(wan_repo_path, stub_top_modules)
+        parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+        iteration = {
+            "iteration": index,
+            "status": result["status"],
+            "returncode": result.get("returncode"),
+            "missing_module": parsed.get("missing_module"),
+            "error_type": parsed.get("error_type"),
+            "error_truncated": parsed.get("error_truncated"),
+            "traceback_tail": parsed.get("traceback_tail", []),
+        }
+        iterations.append(iteration)
+        if result["status"] == "import_generate_ok":
+            break
+        if result["status"] != "missing_module" or not parsed.get("missing_module"):
+            break
+        missing_module = str(parsed["missing_module"]).split(".", 1)[0]
+        if missing_module not in missing_modules:
+            missing_modules.append(missing_module)
+        stub_top_modules.add(missing_module)
+
+    missing_packages = sorted({module_to_requirement_name(module) for module in missing_modules})
+    missing_not_declared = sorted(package for package in missing_packages if package not in declared_names)
+    deferred_optional = sorted(package for package in missing_not_declared if package in DEFERRED_OPTIONAL_PACKAGES)
+    recommended = sorted(package for package in missing_not_declared if package not in DEFERRED_OPTIONAL_PACKAGES)
+    final_status = iterations[-1]["status"] if iterations else "not_attempted"
+    return {
+        "status": final_status,
+        "attempted": True,
+        "command_intent": f"{sys.executable} -c \"import sys; sys.path.insert(0, '<WAN22_REPO>'); import generate\"",
+        "uses_gpu": False,
+        "downloads_model_weights": False,
+        "runs_inference": False,
+        "max_iterations": max_iterations,
+        "iterations": iterations,
+        "missing_modules_detected": missing_modules,
+        "missing_packages_detected": missing_packages,
+        "missing_packages_not_declared": missing_not_declared,
+        "recommended_requirements_additions": recommended,
+        "deferred_optional_additions": deferred_optional,
+        "stubbed_declared_or_previously_missing_modules": sorted(stub_top_modules),
+    }
+
+
 def build_dependency_audit(requirements: dict[str, Any], dockerfile_packages: dict[str, Any], scan: dict[str, Any]) -> dict[str, Any]:
     declared_packages = dict(requirements["packages"])
     declared_packages.update(dockerfile_packages)
@@ -536,7 +717,24 @@ def build_dependency_audit(requirements: dict[str, Any], dockerfile_packages: di
     }
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Audit Blackwell Wan2.2 Python dependencies offline.")
+    parser.add_argument(
+        "--skip-global-import-check",
+        action="store_true",
+        help="Skip the subprocess import-generate probe.",
+    )
+    parser.add_argument(
+        "--global-import-max-iterations",
+        type=int,
+        default=80,
+        help="Maximum ModuleNotFoundError discovery iterations for import generate.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
     print(f"[{TEST_ID}] start offline dependency audit")
     requirements = parse_requirements(REQUIREMENTS_PATH)
     dockerfile_packages = parse_dockerfile_implicit_packages(DOCKERFILE_PATH)
@@ -558,6 +756,8 @@ def main() -> int:
             "runs_inference": False,
             "generates_video": False,
             "clones_code_only_if_needed": True,
+            "global_import_probe_downloads_weights": False,
+            "global_import_probe_runs_inference": False,
         },
     }
 
@@ -573,12 +773,41 @@ def main() -> int:
 
     scan = scan_imports(Path(str(wan_repo["path"])))
     audit = build_dependency_audit(requirements, dockerfile_packages, scan)
+    global_import_probe = (
+        {
+            "status": "skipped",
+            "attempted": False,
+            "reason": "--skip-global-import-check",
+            "recommended_requirements_additions": [],
+            "deferred_optional_additions": [],
+        }
+        if args.skip_global_import_check
+        else run_generate_global_import_probe(
+            Path(str(wan_repo["path"])),
+            requirements,
+            dockerfile_packages,
+            max(1, int(args.global_import_max_iterations)),
+        )
+    )
+    combined_recommendations = sorted(
+        set(audit["recommended_requirements_additions"])
+        | set(global_import_probe.get("recommended_requirements_additions", []))
+    )
+    combined_deferred = sorted(
+        set(audit.get("deferred_optional_additions", []))
+        | set(global_import_probe.get("deferred_optional_additions", []))
+    )
+    if combined_recommendations:
+        audit["status"] = "missing_dependencies_found"
+    audit["combined_recommended_requirements_additions"] = combined_recommendations
+    audit["combined_deferred_optional_additions"] = combined_deferred
     report.update(
         {
             "status": audit["status"],
             "requirements": requirements,
             "dockerfile_implicit_packages": dockerfile_packages,
             "scan": scan,
+            "global_import_probe": global_import_probe,
             "audit": audit,
         }
     )
@@ -587,11 +816,12 @@ def main() -> int:
     REPORT_PATH.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     missing_focus = [row["package"] for row in audit["missing_focus_dependencies"]]
-    recommended = audit["recommended_requirements_additions"]
+    recommended = audit["combined_recommended_requirements_additions"]
     print(f"[{TEST_ID}] status={report['status']}")
     print(f"[{TEST_ID}] wan_repo_path={wan_repo['path']}")
     print(f"[{TEST_ID}] missing_focus_dependencies={missing_focus}")
     print(f"[{TEST_ID}] recommended_requirements_additions={recommended}")
+    print(f"[{TEST_ID}] deferred_optional_additions={audit['combined_deferred_optional_additions']}")
     print(f"[{TEST_ID}] report={REPORT_PATH}")
     return 0
 
