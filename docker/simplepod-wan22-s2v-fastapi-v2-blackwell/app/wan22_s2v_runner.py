@@ -148,7 +148,6 @@ def resolve_wan22_parameters(payload: dict[str, Any]) -> dict:
     )
     forwarded = {
         "positive_prompt": positive_prompt,
-        "negative_prompt": str(payload.get("negative_prompt") or ""),
         "seed": int(payload.get("seed", 42)),
         "steps": int(payload.get("steps", 4)),
         "cfg": float(payload.get("cfg", 1.0)),
@@ -157,6 +156,12 @@ def resolve_wan22_parameters(payload: dict[str, Any]) -> dict:
         "convert_model_dtype": True,
         "task": "s2v-14B",
     }
+    not_forwarded = {}
+    if payload.get("negative_prompt"):
+        not_forwarded["negative_prompt"] = {
+            "value": str(payload.get("negative_prompt") or ""),
+            "reason": "Native Wan2.2 generate.py does not accept --negative_prompt.",
+        }
     unsupported = [
         key
         for key in UNSUPPORTED_NATIVE_WAN22_PARAMETER_FIELDS
@@ -165,6 +170,7 @@ def resolve_wan22_parameters(payload: dict[str, Any]) -> dict:
     return {
         "received_parameters": received,
         "forwarded_parameters": forwarded,
+        "not_forwarded_parameters": not_forwarded,
         "unsupported_parameters": unsupported,
         "supported_parameter_fields": list(SUPPORTED_WAN22_PARAMETER_FIELDS),
         "unsupported_parameter_fields": list(UNSUPPORTED_NATIVE_WAN22_PARAMETER_FIELDS),
@@ -202,8 +208,6 @@ def build_command(
         "--save_file",
         str(output_path),
     ]
-    if forwarded_parameters.get("negative_prompt"):
-        command.extend(["--negative_prompt", str(forwarded_parameters["negative_prompt"])])
     command.extend(["--sample_steps", str(forwarded_parameters["steps"])])
     command.extend(["--sample_shift", str(forwarded_parameters["shift"])])
     command.extend(["--sample_guide_scale", str(forwarded_parameters["cfg"])])
@@ -358,6 +362,7 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
         "r2_upload_attempted": False,
         "received_parameters": parameter_resolution["received_parameters"],
         "forwarded_parameters": parameter_resolution["forwarded_parameters"],
+        "not_forwarded_parameters": parameter_resolution["not_forwarded_parameters"],
         "unsupported_parameters": parameter_resolution["unsupported_parameters"],
         "supported_parameter_fields": parameter_resolution["supported_parameter_fields"],
         "unsupported_parameter_fields": parameter_resolution["unsupported_parameter_fields"],
