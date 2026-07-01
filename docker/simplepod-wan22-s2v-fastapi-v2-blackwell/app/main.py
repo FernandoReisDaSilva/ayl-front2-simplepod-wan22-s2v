@@ -90,6 +90,7 @@ RELEVANT_PACKAGES = (
     "imageio",
     "imageio-ffmpeg",
     "easydict",
+    "einops",
     "ftfy",
 )
 WAN_CODE_IMPORT_ATTEMPTED_MODULES = (

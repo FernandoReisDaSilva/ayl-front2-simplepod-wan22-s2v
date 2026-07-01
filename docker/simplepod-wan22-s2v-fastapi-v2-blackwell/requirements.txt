@@ -6,6 +6,7 @@ huggingface_hub[cli]==0.27.1
 accelerate==1.2.1
 diffusers==0.32.1
 easydict==1.13
+einops==0.8.1
 ftfy==6.3.1
 imageio==2.36.1
 imageio-ffmpeg==0.5.1

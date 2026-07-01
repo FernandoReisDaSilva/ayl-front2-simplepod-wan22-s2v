@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_blackwell_wan22_runtime_verify_v1.json"
 
 TEMPLATE_ID = 25138
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.2-blackwell"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.5-blackwell"
 STABLE_IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6"
 VERIFY_ENDPOINT = "/admin/verify-wan22-s2v-runtime"
 PORT = 8000
@@ -117,8 +117,8 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
         "template_id": TEMPLATE_ID,
         "image_ref": IMAGE,
         "stable_image_unchanged": STABLE_IMAGE,
-        "requires_new_image_tag": "0.2.2-blackwell",
-        "why_new_tag_needed": "Adds detailed Wan2.2 import diagnostics to GET /admin/verify-wan22-s2v-runtime.",
+        "requires_new_image_tag": "0.2.5-blackwell",
+        "why_new_tag_needed": "Adds einops dependency required by Wan2.2 VAE and verifies it in runtime package inventory.",
         "selected_market_id": data.get("market_selection", {}).get("selected_market_id") or selected_summary.get("market_id", ""),
         "gpuModel": selected_summary.get("gpuModel", ""),
         "gpuMemorySize": selected_summary.get("gpuMemorySize"),
