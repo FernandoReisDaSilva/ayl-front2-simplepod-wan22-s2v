@@ -3,6 +3,21 @@ from pathlib import Path
 
 
 WAN22_REPO_DIR = Path("/opt/Wan2.2")
+TARGET_SIZE = "1080*1080"
+
+
+def ensure_supported_size(supported_sizes: dict, task: str, size: str) -> None:
+    if task not in supported_sizes:
+        return
+    existing_sizes = supported_sizes[task]
+    if size in existing_sizes:
+        return
+    if isinstance(existing_sizes, tuple):
+        supported_sizes[task] = (*existing_sizes, size)
+    elif isinstance(existing_sizes, list):
+        supported_sizes[task] = [*existing_sizes, size]
+    else:
+        supported_sizes[task] = tuple([*list(existing_sizes), size])
 
 
 def main() -> int:
@@ -12,10 +27,9 @@ def main() -> int:
     import generate
     from wan.configs import SIZE_CONFIGS, MAX_AREA_CONFIGS, SUPPORTED_SIZES
 
-    SIZE_CONFIGS["1080*1080"] = (1080, 1080)
-    MAX_AREA_CONFIGS["1080*1080"] = 1080 * 1080
-    if "s2v-14B" in SUPPORTED_SIZES and "1080*1080" not in SUPPORTED_SIZES["s2v-14B"]:
-        SUPPORTED_SIZES["s2v-14B"].append("1080*1080")
+    SIZE_CONFIGS[TARGET_SIZE] = (1080, 1080)
+    MAX_AREA_CONFIGS[TARGET_SIZE] = 1080 * 1080
+    ensure_supported_size(SUPPORTED_SIZES, "s2v-14B", TARGET_SIZE)
 
     args = generate._parse_args()
     generate._validate_args(args)
