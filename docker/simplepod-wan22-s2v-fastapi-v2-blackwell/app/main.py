@@ -19,10 +19,31 @@ from .wan22_s2v_runner import run_wan22_s2v_single_job
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_VERSION)
 
 REQUIRED_JOB_FIELDS = ("reference_image_key", "audio_key")
-OPTIONAL_JOB_FIELDS = ("output_video_key", "final_report_key", "prompt", "seed", "duration_seconds")
+OPTIONAL_JOB_FIELDS = (
+    "output_video_key",
+    "final_report_key",
+    "positive_prompt",
+    "negative_prompt",
+    "prompt",
+    "seed",
+    "steps",
+    "cfg",
+    "shift",
+    "denoise_strength",
+    "audio_scale",
+    "pose_start_percent",
+    "pose_end_percent",
+    "num_frames",
+    "duration_seconds",
+)
 WAN22_S2V_REPO_ID = "Wan-AI/Wan2.2-S2V-14B"
 DOWNLOAD_CONFIRMATION = "DOWNLOAD_WAN22_S2V_WEIGHTS"
-INFERENCE_CONFIRMATION = "RUN_WAN22_S2V_MAE_14_8S_1080"
+INFERENCE_CONFIRMATIONS = {
+    "RUN_WAN22_S2V_MAE_14_8S_1080",
+    "RUN_WAN22_S2V_MAE_14_8S_1080_BLACKWELL",
+    "RUN_WAN22_S2V_MAE_14_8S_1080_BLACKWELL_NATURAL_V5",
+    "RUN_WAN22_S2V_MAE_14_8S_1080_BLACKWELL_NATURAL_V5_NATIVE_PARTIAL",
+}
 ADMIN_DOWNLOAD_ENV = "AYL_ENABLE_ADMIN_DOWNLOADS"
 ADMIN_VERIFY_ENV = "AYL_ENABLE_ADMIN_VERIFY"
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 7200
@@ -30,6 +51,8 @@ OUTPUT_TRUNCATE_CHARS = 4000
 WAN22_REPO_DIR = Path(os.getenv("WAN22_REPO_DIR", "/opt/Wan2.2"))
 RUN_JOB_REQUIRED_FIELDS = (
     "job_id",
+    "character_id",
+    "base_taught_language",
     "reference_image_key",
     "audio_key",
     "target_width",
@@ -38,6 +61,23 @@ RUN_JOB_REQUIRED_FIELDS = (
     "target_duration_seconds",
     "output_video_key",
     "output_report_key",
+    "confirm_inference",
+    "allow_oom_fallback",
+)
+RUN_JOB_OPTIONAL_FIELDS = (
+    "positive_prompt",
+    "negative_prompt",
+    "prompt",
+    "seed",
+    "steps",
+    "cfg",
+    "shift",
+    "denoise_strength",
+    "audio_scale",
+    "pose_start_percent",
+    "pose_end_percent",
+    "num_frames",
+    "timeout_seconds",
 )
 RELEVANT_PACKAGES = (
     "torch",
@@ -310,13 +350,13 @@ def validate_job_payload(payload: Any) -> dict:
 def validate_run_job_payload(payload: Any) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="Job body must be a JSON object.")
-    if payload.get("confirm_inference") != INFERENCE_CONFIRMATION:
+    if payload.get("confirm_inference") not in INFERENCE_CONFIRMATIONS:
         raise HTTPException(
             status_code=422,
             detail={
                 "message": "Explicit inference confirmation is required.",
                 "required_field": "confirm_inference",
-                "expected_value": INFERENCE_CONFIRMATION,
+                "expected_values": sorted(INFERENCE_CONFIRMATIONS),
             },
         )
     missing = [field for field in RUN_JOB_REQUIRED_FIELDS if payload.get(field) in ("", None)]
@@ -327,10 +367,10 @@ def validate_run_job_payload(payload: Any) -> dict:
                 "message": "Missing required Wan2.2 S2V run field(s).",
                 "missing": missing,
                 "required": list(RUN_JOB_REQUIRED_FIELDS),
+                "optional": list(RUN_JOB_OPTIONAL_FIELDS),
             },
         )
     expected_values = {
-        "job_id": "mae_fr_wan22_s2v_14_8s_1080_v1",
         "target_width": 1080,
         "target_height": 1080,
         "fps": 16,
@@ -348,6 +388,14 @@ def validate_run_job_payload(payload: Any) -> dict:
             matches = value == expected
         if not matches:
             mismatches[key] = {"expected": expected, "received": value}
+    allowed_job_ids = {
+        "mae_fr_wan22_s2v_14_8s_1080_v1",
+        "mae_fr_wan22_s2v_14_8s_1080_blackwell_v1",
+        "mae_fr_wan22_s2v_14_8s_1080_blackwell_natural_v5",
+        "mae_fr_wan22_s2v_14_8s_1080_blackwell_natural_v5_native_partial",
+    }
+    if payload.get("job_id") not in allowed_job_ids:
+        mismatches["job_id"] = {"expected_one_of": sorted(allowed_job_ids), "received": payload.get("job_id")}
     if mismatches:
         raise HTTPException(
             status_code=422,

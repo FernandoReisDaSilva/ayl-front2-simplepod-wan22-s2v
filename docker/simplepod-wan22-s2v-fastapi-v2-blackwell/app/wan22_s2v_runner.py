@@ -19,6 +19,36 @@ OOM_MARKERS = (
     "cublas_status_alloc_failed",
     "cudnn_status_alloc_failed",
 )
+WAN22_PARAMETER_FIELDS = (
+    "positive_prompt",
+    "negative_prompt",
+    "prompt",
+    "seed",
+    "steps",
+    "cfg",
+    "shift",
+    "denoise_strength",
+    "audio_scale",
+    "pose_start_percent",
+    "pose_end_percent",
+    "num_frames",
+)
+SUPPORTED_WAN22_PARAMETER_FIELDS = (
+    "positive_prompt",
+    "negative_prompt",
+    "prompt",
+    "seed",
+    "steps",
+    "cfg",
+    "shift",
+)
+UNSUPPORTED_NATIVE_WAN22_PARAMETER_FIELDS = (
+    "denoise_strength",
+    "audio_scale",
+    "pose_start_percent",
+    "pose_end_percent",
+    "num_frames",
+)
 
 
 def truncate_output(value: str) -> str:
@@ -105,13 +135,57 @@ def is_oom_result(stdout: str, stderr: str) -> bool:
     return any(marker in text for marker in OOM_MARKERS)
 
 
-def build_command(image_path: Path, audio_path: Path, output_path: Path, model_dir: Path, width: int, height: int) -> list[str]:
-    return [
+def received_wan22_parameters(payload: dict[str, Any]) -> dict:
+    return {key: payload[key] for key in WAN22_PARAMETER_FIELDS if key in payload}
+
+
+def resolve_wan22_parameters(payload: dict[str, Any]) -> dict:
+    received = received_wan22_parameters(payload)
+    positive_prompt = str(
+        payload.get("positive_prompt")
+        or payload.get("prompt")
+        or "A natural, stable talking-head lip sync video of Maé speaking French."
+    )
+    forwarded = {
+        "positive_prompt": positive_prompt,
+        "negative_prompt": str(payload.get("negative_prompt") or ""),
+        "seed": int(payload.get("seed", 42)),
+        "steps": int(payload.get("steps", 4)),
+        "cfg": float(payload.get("cfg", 1.0)),
+        "shift": float(payload.get("shift", 4.0)),
+        "offload_model": True,
+        "convert_model_dtype": True,
+        "task": "s2v-14B",
+    }
+    unsupported = [
+        key
+        for key in UNSUPPORTED_NATIVE_WAN22_PARAMETER_FIELDS
+        if key in payload
+    ]
+    return {
+        "received_parameters": received,
+        "forwarded_parameters": forwarded,
+        "unsupported_parameters": unsupported,
+        "supported_parameter_fields": list(SUPPORTED_WAN22_PARAMETER_FIELDS),
+        "unsupported_parameter_fields": list(UNSUPPORTED_NATIVE_WAN22_PARAMETER_FIELDS),
+    }
+
+
+def build_command(
+    image_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    model_dir: Path,
+    width: int,
+    height: int,
+    forwarded_parameters: dict[str, Any],
+) -> list[str]:
+    command = [
         "python",
         "-m",
         "app.wan22_s2v_generate_wrapper",
         "--task",
-        "s2v-14B",
+        str(forwarded_parameters["task"]),
         "--size",
         f"{width}*{height}",
         "--ckpt_dir",
@@ -120,7 +194,7 @@ def build_command(image_path: Path, audio_path: Path, output_path: Path, model_d
         "True",
         "--convert_model_dtype",
         "--prompt",
-        "A natural, stable talking-head lip sync video of Maé speaking French.",
+        str(forwarded_parameters["positive_prompt"]),
         "--image",
         str(image_path),
         "--audio",
@@ -128,6 +202,13 @@ def build_command(image_path: Path, audio_path: Path, output_path: Path, model_d
         "--save_file",
         str(output_path),
     ]
+    if forwarded_parameters.get("negative_prompt"):
+        command.extend(["--negative_prompt", str(forwarded_parameters["negative_prompt"])])
+    command.extend(["--sample_steps", str(forwarded_parameters["steps"])])
+    command.extend(["--sample_shift", str(forwarded_parameters["shift"])])
+    command.extend(["--sample_guide_scale", str(forwarded_parameters["cfg"])])
+    command.extend(["--base_seed", str(forwarded_parameters["seed"])])
+    return command
 
 
 def run_command(command: list[str], timeout_seconds: int) -> dict:
@@ -250,10 +331,13 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
     local_report_path = work_dir / "final_report.json"
 
     started = time.monotonic()
+    parameter_resolution = resolve_wan22_parameters(payload)
     report: dict[str, Any] = {
         "job_id": job_id,
         "status": "started",
         "created_at": now_iso(),
+        "character_id": payload.get("character_id", ""),
+        "base_taught_language": payload.get("base_taught_language", ""),
         "reference_image_key": payload["reference_image_key"],
         "audio_key": payload["audio_key"],
         "requested_resolution": {"width": payload["target_width"], "height": payload["target_height"]},
@@ -272,9 +356,33 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
         "placeholder_generated": False,
         "video_generated": False,
         "r2_upload_attempted": False,
+        "received_parameters": parameter_resolution["received_parameters"],
+        "forwarded_parameters": parameter_resolution["forwarded_parameters"],
+        "unsupported_parameters": parameter_resolution["unsupported_parameters"],
+        "supported_parameter_fields": parameter_resolution["supported_parameter_fields"],
+        "unsupported_parameter_fields": parameter_resolution["unsupported_parameter_fields"],
     }
 
     try:
+        if parameter_resolution["unsupported_parameters"]:
+            report["status"] = "unsupported_wan22_parameter"
+            report["error_type"] = "unsupported_wan22_parameter"
+            report["error_truncated"] = (
+                "Native Wan2.2 S2V runner does not currently support these payload fields: "
+                + ", ".join(parameter_resolution["unsupported_parameters"])
+            )
+            report["inference_executed"] = False
+            report["runtime_seconds"] = round(time.monotonic() - started, 3)
+            write_json(local_report_path, report)
+            if r2_env_ready():
+                try:
+                    upload_file(local_report_path, payload["output_report_key"])
+                    report["report_uploaded_to_r2"] = True
+                except Exception as upload_exc:
+                    report["report_upload_error_type"] = type(upload_exc).__name__
+                    report["report_upload_error_truncated"] = str(upload_exc)[:1000]
+            return report
+
         preflight = r2_preflight(payload)
         report["r2_preflight"] = preflight
         report["r2_env_check_status"] = preflight["r2_env_check_status"]
@@ -303,6 +411,7 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
             settings.wan22_s2v_model_dir,
             int(payload["target_width"]),
             int(payload["target_height"]),
+            parameter_resolution["forwarded_parameters"],
         )
         primary_result = run_command(primary_command, int(payload.get("timeout_seconds") or 7200))
         report["primary_inference"] = primary_result
@@ -314,7 +423,15 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
             report["status"] = "succeeded"
             report["actual_generation_resolution"] = {"width": payload["target_width"], "height": payload["target_height"]}
         elif primary_result["status"] == "oom" and payload.get("allow_oom_fallback"):
-            fallback_command = build_command(input_image, input_audio, output_960, settings.wan22_s2v_model_dir, 960, 960)
+            fallback_command = build_command(
+                input_image,
+                input_audio,
+                output_960,
+                settings.wan22_s2v_model_dir,
+                960,
+                960,
+                parameter_resolution["forwarded_parameters"],
+            )
             fallback_result = run_command(fallback_command, int(payload.get("timeout_seconds") or 7200))
             report["fallback_inference"] = fallback_result
             report["fallback_command"] = fallback_command
