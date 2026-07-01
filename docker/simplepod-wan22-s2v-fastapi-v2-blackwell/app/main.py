@@ -98,6 +98,7 @@ RELEVANT_PACKAGES = (
     "decord",
     "moviepy",
     "omegaconf",
+    "peft",
     "easydict",
     "einops",
     "ftfy",

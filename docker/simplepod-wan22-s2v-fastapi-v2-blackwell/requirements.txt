@@ -21,3 +21,4 @@ librosa==0.10.2.post1
 decord==0.6.0
 moviepy==1.0.3
 omegaconf==2.3.0
+peft==0.14.0
