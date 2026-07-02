@@ -1,3 +1,5 @@
+import gc
+import inspect
 import uuid
 import importlib
 import importlib.metadata
@@ -110,6 +112,12 @@ WAN_CODE_IMPORT_ATTEMPTED_MODULES = (
     "wan.configs",
     "wan.modules",
     "generate",
+)
+WAN_MODEL_S2V_CLASS_CANDIDATES = (
+    ("wan.modules.model", "WanModel_S2V"),
+    ("wan.modules.model_s2v", "WanModel_S2V"),
+    ("wan.modules.wan_model", "WanModel_S2V"),
+    ("wan", "WanModel_S2V"),
 )
 
 
@@ -692,6 +700,221 @@ def wan22_safetensors_shard_check(allow_load_file_cpu: bool = False) -> dict:
 def check_wan22_safetensors_shard(allow_load_file_cpu: bool = False) -> dict:
     require_admin_verify_enabled()
     return wan22_safetensors_shard_check(allow_load_file_cpu=allow_load_file_cpu)
+
+
+def locate_wan_model_s2v_class() -> dict:
+    if str(WAN22_REPO_DIR) not in sys.path:
+        sys.path.insert(0, str(WAN22_REPO_DIR))
+    attempts = []
+    for module_name, class_name in WAN_MODEL_S2V_CLASS_CANDIDATES:
+        attempt = {
+            "module": module_name,
+            "class_name": class_name,
+            "status": "started",
+        }
+        try:
+            module = importlib.import_module(module_name)
+            klass = getattr(module, class_name)
+            from_pretrained = getattr(klass, "from_pretrained", None)
+            try:
+                signature = str(inspect.signature(from_pretrained)) if callable(from_pretrained) else ""
+            except Exception as signature_exc:
+                signature = f"<signature_unavailable:{type(signature_exc).__name__}>"
+            attempt.update(
+                {
+                    "status": "ok",
+                    "module_file": str(getattr(module, "__file__", "") or ""),
+                    "class_module": str(getattr(klass, "__module__", "") or ""),
+                    "class_qualname": str(getattr(klass, "__qualname__", class_name) or class_name),
+                    "has_from_pretrained": callable(from_pretrained),
+                    "from_pretrained_signature": signature,
+                }
+            )
+            return {"status": "ok", "selected": attempt, "attempts": attempts + [attempt], "class": klass}
+        except Exception as exc:
+            traceback_lines = traceback.format_exc().splitlines()
+            attempt.update(
+                {
+                    "status": "failed",
+                    "error_type": type(exc).__name__,
+                    "error_truncated": str(exc)[:1000],
+                    "traceback_tail": traceback_lines[-8:],
+                }
+            )
+            attempts.append(attempt)
+    return {"status": "failed", "selected": {}, "attempts": attempts, "class": None}
+
+
+def wan22_checkpoint_inventory(model_dir: Path) -> dict:
+    safetensors_paths = sorted(model_dir.rglob("*.safetensors")) if model_dir.exists() else []
+    index_paths = sorted(model_dir.rglob("*.index.json")) if model_dir.exists() else []
+    config_paths = sorted(model_dir.rglob("config.json")) if model_dir.exists() else []
+    return {
+        "model_dir": str(model_dir),
+        "model_dir_exists": model_dir.exists(),
+        "model_dir_is_dir": model_dir.is_dir(),
+        "safetensors_count": len(safetensors_paths),
+        "safetensors_sample": [
+            {
+                "path": str(path),
+                "relative_path": str(path.relative_to(model_dir)) if path.is_relative_to(model_dir) else str(path),
+                "size_gb": round(path.stat().st_size / (1024**3), 3),
+            }
+            for path in safetensors_paths[:20]
+        ],
+        "index_json_files": [
+            str(path.relative_to(model_dir)) if path.is_relative_to(model_dir) else str(path)
+            for path in index_paths[:20]
+        ],
+        "config_json_files": [
+            str(path.relative_to(model_dir)) if path.is_relative_to(model_dir) else str(path)
+            for path in config_paths[:20]
+        ],
+    }
+
+
+def sanitize_dispatch_kwargs(kwargs: dict[str, Any]) -> dict:
+    sanitized = {}
+    for key, value in kwargs.items():
+        if key == "torch_dtype":
+            sanitized[key] = str(value)
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
+def install_optional_safetensors_cuda_to_cpu_patch(enabled: bool) -> dict:
+    if not enabled:
+        return {"enabled": False, "status": "not_requested"}
+    try:
+        from .wan22_s2v_generate_wrapper import install_safetensors_cuda_to_cpu_patch
+
+        os.environ["AYL_SAFETENSORS_CUDA_TO_CPU_PATCH"] = "1"
+        install_safetensors_cuda_to_cpu_patch()
+        return {"enabled": True, "status": "installed"}
+    except Exception as exc:
+        traceback_lines = traceback.format_exc().splitlines()
+        return {
+            "enabled": True,
+            "status": "failed",
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:1000],
+            "traceback_tail": traceback_lines[-8:],
+        }
+
+
+def wan22_accelerate_dispatch_check(apply_safetensors_cuda_to_cpu_patch: bool = False) -> dict:
+    settings = get_settings()
+    gpu_status = torch_probe()
+    model_dir = settings.wan22_s2v_model_dir
+    checkpoint_inventory = wan22_checkpoint_inventory(model_dir)
+    result = {
+        "status": "started",
+        "service": SERVICE_NAME,
+        "timestamp": now_iso(),
+        "model_dir": str(model_dir),
+        "wan_repo_path": str(WAN22_REPO_DIR),
+        "wan_repo_path_exists": WAN22_REPO_DIR.exists(),
+        "cwd": os.getcwd(),
+        "python_version": sys.version,
+        "sys_path_tail": sys.path[-12:],
+        "torch": {
+            "torch_import_status": gpu_status.get("torch_import_status"),
+            "torch_version": gpu_status.get("torch_version", ""),
+            "torch_cuda_version": gpu_status.get("torch_cuda_version", ""),
+            "cuda_available": gpu_status.get("cuda_available"),
+            "device_name": gpu_status.get("device_name", ""),
+            "device_capability": gpu_status.get("device_capability"),
+        },
+        "versions": {
+            "torch": package_version("torch"),
+            "diffusers": package_version("diffusers"),
+            "accelerate": package_version("accelerate"),
+            "safetensors": package_version("safetensors"),
+            "transformers": package_version("transformers"),
+        },
+        "checkpoint_inventory": checkpoint_inventory,
+        "device_map": {"": "cuda:0"},
+        "offload": False,
+        "dtype": "torch.bfloat16",
+        "low_cpu_mem_usage": True,
+        "local_files_only": True,
+        "download_attempted": False,
+        "downloads_attempted": False,
+        "loads_full_model": True,
+        "sampling_executed": False,
+        "generate_called": False,
+        "inference_executed": False,
+        "video_generated": False,
+        "placeholder_generated": False,
+    }
+    if not model_dir.exists() or not model_dir.is_dir():
+        result["status"] = "missing_model_dir"
+        return result
+    patch_result = install_optional_safetensors_cuda_to_cpu_patch(apply_safetensors_cuda_to_cpu_patch)
+    result["safetensors_cuda_to_cpu_patch"] = patch_result
+    locate_result = locate_wan_model_s2v_class()
+    klass = locate_result.pop("class", None)
+    result["wan_model_s2v_import"] = locate_result
+    if locate_result.get("status") != "ok" or klass is None:
+        result["status"] = "failed_import_wan_model_s2v"
+        return result
+
+    model_obj = None
+    try:
+        import torch
+
+        dispatch_kwargs = {
+            "torch_dtype": torch.bfloat16,
+            "device_map": {"": "cuda:0"},
+            "low_cpu_mem_usage": True,
+            "local_files_only": True,
+        }
+        result["from_pretrained_call"] = {
+            "class_module": str(getattr(klass, "__module__", "") or ""),
+            "class_qualname": str(getattr(klass, "__qualname__", "") or ""),
+            "pretrained_model_name_or_path": str(model_dir),
+            "kwargs": sanitize_dispatch_kwargs(dispatch_kwargs),
+            "purpose": "diagnose accelerate/diffusers checkpoint dispatch only; no sampling or generate call",
+        }
+        model_obj = klass.from_pretrained(str(model_dir), **dispatch_kwargs)
+        result["status"] = "dispatch_succeeded"
+        result["from_pretrained_result"] = {
+            "status": "succeeded",
+            "object_type": type(model_obj).__name__,
+            "object_module": type(model_obj).__module__,
+        }
+    except Exception as exc:
+        traceback_lines = traceback.format_exc().splitlines()
+        result["status"] = "failed_accelerate_dispatch"
+        result["from_pretrained_result"] = {
+            "status": "failed",
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:2000],
+            "traceback_tail": traceback_lines[-24:],
+        }
+    finally:
+        try:
+            del model_obj
+        except Exception:
+            pass
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+    return result
+
+
+@app.get("/admin/check-wan22-accelerate-dispatch")
+def check_wan22_accelerate_dispatch(apply_safetensors_cuda_to_cpu_patch: bool = False) -> dict:
+    require_admin_verify_enabled()
+    return wan22_accelerate_dispatch_check(
+        apply_safetensors_cuda_to_cpu_patch=apply_safetensors_cuda_to_cpu_patch,
+    )
 
 
 @app.post("/admin/download-wan22-s2v-weights")
