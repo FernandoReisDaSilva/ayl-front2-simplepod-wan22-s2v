@@ -215,9 +215,48 @@ def build_command(
     return command
 
 
+def command_arg_value(command: list[str], name: str) -> str:
+    try:
+        index = command.index(name)
+    except ValueError:
+        return ""
+    if index + 1 >= len(command):
+        return ""
+    return command[index + 1]
+
+
+def read_json_if_exists(path: Path) -> dict:
+    if not path.exists():
+        return {
+            "patch_requested": os.getenv("AYL_SAFETENSORS_CUDA_TO_CPU_PATCH", "") == "1",
+            "patch_applied": False,
+            "patched_calls_count": 0,
+            "redirected_devices": [],
+            "status": "missing_patch_report",
+        }
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "patch_requested": os.getenv("AYL_SAFETENSORS_CUDA_TO_CPU_PATCH", "") == "1",
+            "patch_applied": False,
+            "patched_calls_count": 0,
+            "redirected_devices": [],
+            "status": "failed_read_patch_report",
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:500],
+        }
+
+
 def run_command(command: list[str], timeout_seconds: int) -> dict:
     monitor = GpuMonitor()
     started = time.monotonic()
+    save_file = command_arg_value(command, "--save_file")
+    patch_report_path = (
+        Path(save_file).with_name("safetensors_cuda_to_cpu_patch_report.json")
+        if save_file
+        else Path("/tmp/ayl_safetensors_cuda_to_cpu_patch_report.json")
+    )
     monitor.start()
     try:
         completed = subprocess.run(
@@ -227,7 +266,11 @@ def run_command(command: list[str], timeout_seconds: int) -> dict:
             text=True,
             timeout=timeout_seconds,
             cwd="/opt/ayl-simplepod-wan22-s2v-fastapi-v2",
-            env={**os.environ, "PYTHONPATH": "/opt/Wan2.2:/opt/ayl-simplepod-wan22-s2v-fastapi-v2"},
+            env={
+                **os.environ,
+                "PYTHONPATH": "/opt/Wan2.2:/opt/ayl-simplepod-wan22-s2v-fastapi-v2",
+                "AYL_SAFETENSORS_PATCH_REPORT_PATH": str(patch_report_path),
+            },
         )
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
@@ -239,6 +282,7 @@ def run_command(command: list[str], timeout_seconds: int) -> dict:
             "stdout_truncated": truncate_output(stdout),
             "stderr_truncated": truncate_output(stderr),
             "telemetry": monitor.summary(),
+            "safetensors_cuda_to_cpu_patch": read_json_if_exists(patch_report_path),
         }
     except subprocess.TimeoutExpired as exc:
         stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
@@ -250,6 +294,7 @@ def run_command(command: list[str], timeout_seconds: int) -> dict:
             "stdout_truncated": truncate_output(stdout),
             "stderr_truncated": truncate_output(stderr),
             "telemetry": monitor.summary(),
+            "safetensors_cuda_to_cpu_patch": read_json_if_exists(patch_report_path),
         }
     finally:
         monitor.stop()
@@ -420,6 +465,7 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
         )
         primary_result = run_command(primary_command, int(payload.get("timeout_seconds") or 7200))
         report["primary_inference"] = primary_result
+        report["safetensors_cuda_to_cpu_patch"] = primary_result.get("safetensors_cuda_to_cpu_patch", {})
         report["command"] = primary_command
         report.update(primary_result.get("telemetry", {}))
 
@@ -439,6 +485,10 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
             )
             fallback_result = run_command(fallback_command, int(payload.get("timeout_seconds") or 7200))
             report["fallback_inference"] = fallback_result
+            report["safetensors_cuda_to_cpu_patch"] = fallback_result.get(
+                "safetensors_cuda_to_cpu_patch",
+                report.get("safetensors_cuda_to_cpu_patch", {}),
+            )
             report["fallback_command"] = fallback_command
             selected_output = output_960
             report["fallback_used"] = fallback_result["status"] == "succeeded" and output_960.exists()
