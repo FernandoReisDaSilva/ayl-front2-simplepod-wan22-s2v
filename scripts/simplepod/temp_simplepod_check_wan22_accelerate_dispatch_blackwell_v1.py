@@ -7,7 +7,7 @@ import temp_simplepod_check_safetensors_device_blackwell_v1 as base
 TEST_ID = "TEMP_SIMPLEPOD_CHECK_WAN22_ACCELERATE_DISPATCH_BLACKWELL_V1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_wan22_accelerate_dispatch_blackwell_v1.json"
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.14-blackwell"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.15-blackwell"
 CHECK_ENDPOINT = "/admin/check-wan22-accelerate-dispatch"
 RUNTIME_VERSION = "v2-blackwell-wan22-accelerate-dispatch-diagnostic"
 GPU_POLICY = "blackwell_full_96gb_accelerate_dispatch_diagnostic_policy"
@@ -63,7 +63,12 @@ def summarize_accelerate_dispatch(value) -> dict:
             "traceback_tail": from_pretrained_result.get("traceback_tail", []),
             "object_type": from_pretrained_result.get("object_type", ""),
             "object_module": from_pretrained_result.get("object_module", ""),
+            "first_parameter_device": from_pretrained_result.get("first_parameter_device", ""),
+            "first_parameter_dtype": from_pretrained_result.get("first_parameter_dtype", ""),
+            "any_parameter_on_cuda": from_pretrained_result.get("any_parameter_on_cuda"),
+            "parameter_device_counts": from_pretrained_result.get("parameter_device_counts", {}),
         },
+        "safetensors_cuda_to_cpu_patch": value.get("safetensors_cuda_to_cpu_patch", {}),
         "download_attempted": value.get("download_attempted"),
         "loads_full_model": value.get("loads_full_model"),
         "sampling_executed": value.get("sampling_executed"),
@@ -111,6 +116,16 @@ def main() -> int:
     base.NO_MODEL_LOAD = False
     base.summarize_safetensors_check = summarize_accelerate_dispatch
     base.build_report = build_report
+    original_runtime_payload = base.runtime_payload
+
+    def runtime_payload(instance_market: str) -> dict:
+        payload = original_runtime_payload(instance_market)
+        payload.setdefault("envVariables", []).append(
+            {"name": "AYL_SAFETENSORS_CUDA_TO_CPU_PATCH", "value": "1"}
+        )
+        return payload
+
+    base.runtime_payload = runtime_payload
     return base.run(parse_args())
 
 

@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import traceback
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -837,24 +838,98 @@ def sanitize_dispatch_kwargs(kwargs: dict[str, Any]) -> dict:
     return sanitized
 
 
-def install_optional_safetensors_cuda_to_cpu_patch(enabled: bool) -> dict:
-    if not enabled:
-        return {"enabled": False, "status": "not_requested"}
+def should_redirect_safetensors_device(device: Any) -> bool:
+    if isinstance(device, str):
+        return device.startswith("cuda")
     try:
-        from .wan22_s2v_generate_wrapper import install_safetensors_cuda_to_cpu_patch
+        return str(device).startswith("cuda")
+    except Exception:
+        return False
 
-        os.environ["AYL_SAFETENSORS_CUDA_TO_CPU_PATCH"] = "1"
-        install_safetensors_cuda_to_cpu_patch()
-        return {"enabled": True, "status": "installed"}
+
+@contextmanager
+def scoped_safetensors_cuda_to_cpu_patch(enabled: bool):
+    state = {
+        "patch_requested": bool(enabled),
+        "patch_applied": False,
+        "patched_calls_count": 0,
+        "redirected_devices": [],
+        "restored": False,
+        "error_type": "",
+        "error_truncated": "",
+    }
+    if not enabled:
+        yield state
+        return
+
+    try:
+        import safetensors
+        import safetensors.torch
     except Exception as exc:
-        traceback_lines = traceback.format_exc().splitlines()
-        return {
-            "enabled": True,
-            "status": "failed",
-            "error_type": type(exc).__name__,
-            "error_truncated": str(exc)[:1000],
-            "traceback_tail": traceback_lines[-8:],
-        }
+        state["error_type"] = type(exc).__name__
+        state["error_truncated"] = str(exc)[:1000]
+        yield state
+        return
+
+    original_load_file = safetensors.torch.load_file
+    original_safe_open = safetensors.safe_open
+    original_torch_safe_open = getattr(safetensors.torch, "safe_open", original_safe_open)
+
+    def redirect_device(device: Any) -> Any:
+        if should_redirect_safetensors_device(device):
+            state["patched_calls_count"] += 1
+            device_text = str(device)
+            if device_text not in state["redirected_devices"]:
+                state["redirected_devices"].append(device_text)
+            return "cpu"
+        return device
+
+    def patched_load_file(filename, device="cpu", *args, **kwargs):
+        return original_load_file(filename, device=redirect_device(device), *args, **kwargs)
+
+    def patched_safe_open(filename, framework, device="cpu", *args, **kwargs):
+        return original_safe_open(filename, framework=framework, device=redirect_device(device), *args, **kwargs)
+
+    def patched_torch_safe_open(filename, framework, device="cpu", *args, **kwargs):
+        return original_torch_safe_open(filename, framework=framework, device=redirect_device(device), *args, **kwargs)
+
+    safetensors.torch.load_file = patched_load_file
+    safetensors.safe_open = patched_safe_open
+    safetensors.torch.safe_open = patched_torch_safe_open
+    state["patch_applied"] = True
+    try:
+        yield state
+    finally:
+        safetensors.torch.load_file = original_load_file
+        safetensors.safe_open = original_safe_open
+        safetensors.torch.safe_open = original_torch_safe_open
+        state["restored"] = True
+
+
+def model_parameter_device_summary(model_obj: Any, sample_limit: int = 2000) -> dict:
+    summary = {
+        "first_parameter_device": "",
+        "first_parameter_dtype": "",
+        "any_parameter_on_cuda": False,
+        "parameter_device_counts": {},
+        "sampled_parameters": 0,
+        "sample_limit": sample_limit,
+    }
+    if model_obj is None or not hasattr(model_obj, "parameters"):
+        return summary
+    for idx, parameter in enumerate(model_obj.parameters()):
+        if idx >= sample_limit:
+            break
+        device = str(getattr(parameter, "device", ""))
+        dtype = str(getattr(parameter, "dtype", ""))
+        if idx == 0:
+            summary["first_parameter_device"] = device
+            summary["first_parameter_dtype"] = dtype
+        summary["parameter_device_counts"][device] = summary["parameter_device_counts"].get(device, 0) + 1
+        if device.startswith("cuda"):
+            summary["any_parameter_on_cuda"] = True
+        summary["sampled_parameters"] += 1
+    return summary
 
 
 def wan22_accelerate_dispatch_check(apply_safetensors_cuda_to_cpu_patch: bool = False) -> dict:
@@ -862,6 +937,7 @@ def wan22_accelerate_dispatch_check(apply_safetensors_cuda_to_cpu_patch: bool = 
     gpu_status = torch_probe()
     model_dir = settings.wan22_s2v_model_dir
     checkpoint_inventory = wan22_checkpoint_inventory(model_dir)
+    patch_requested = os.getenv("AYL_SAFETENSORS_CUDA_TO_CPU_PATCH", "") == "1" or apply_safetensors_cuda_to_cpu_patch
     result = {
         "status": "started",
         "service": SERVICE_NAME,
@@ -901,12 +977,16 @@ def wan22_accelerate_dispatch_check(apply_safetensors_cuda_to_cpu_patch: bool = 
         "inference_executed": False,
         "video_generated": False,
         "placeholder_generated": False,
+        "safetensors_cuda_to_cpu_patch": {
+            "patch_requested": patch_requested,
+            "patch_applied": False,
+            "patched_calls_count": 0,
+            "redirected_devices": [],
+        },
     }
     if not model_dir.exists() or not model_dir.is_dir():
         result["status"] = "missing_model_dir"
         return result
-    patch_result = install_optional_safetensors_cuda_to_cpu_patch(apply_safetensors_cuda_to_cpu_patch)
-    result["safetensors_cuda_to_cpu_patch"] = patch_result
     locate_result = locate_wan_s2v_runtime_path()
     klass = locate_result.pop("_class", None)
     result["wan_s2v_runtime_path"] = locate_result
@@ -915,6 +995,7 @@ def wan22_accelerate_dispatch_check(apply_safetensors_cuda_to_cpu_patch: bool = 
         return result
 
     model_obj = None
+    patch_state_result = dict(result["safetensors_cuda_to_cpu_patch"])
     try:
         import torch
         from wan.configs import WAN_CONFIGS
@@ -944,15 +1025,23 @@ def wan22_accelerate_dispatch_check(apply_safetensors_cuda_to_cpu_patch: bool = 
             "matches_real_wan_s2v_init_noise_model_call": True,
             "purpose": "diagnose WanS2V noise_model checkpoint dispatch only; no WanS2V.generate, sampling, audio encode, VAE decode, or video save",
         }
-        model_obj = klass.from_pretrained(str(model_dir), **dispatch_kwargs)
+        with scoped_safetensors_cuda_to_cpu_patch(patch_requested) as patch_state:
+            model_obj = klass.from_pretrained(str(model_dir), **dispatch_kwargs)
+        patch_state_result = dict(patch_state)
+        result["safetensors_cuda_to_cpu_patch"] = patch_state_result
+        parameter_summary = model_parameter_device_summary(model_obj)
         result["status"] = "dispatch_succeeded"
         result["from_pretrained_result"] = {
             "status": "succeeded",
             "object_type": type(model_obj).__name__,
             "object_module": type(model_obj).__module__,
+            **parameter_summary,
         }
     except Exception as exc:
         traceback_lines = traceback.format_exc().splitlines()
+        if "patch_state" in locals():
+            patch_state_result = dict(patch_state)
+        result["safetensors_cuda_to_cpu_patch"] = patch_state_result
         result["status"] = "failed_accelerate_dispatch"
         result["from_pretrained_result"] = {
             "status": "failed",
