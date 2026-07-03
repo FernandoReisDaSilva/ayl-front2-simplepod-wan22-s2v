@@ -114,10 +114,7 @@ WAN_CODE_IMPORT_ATTEMPTED_MODULES = (
     "generate",
 )
 WAN_MODEL_S2V_CLASS_CANDIDATES = (
-    ("wan.modules.model", "WanModel_S2V"),
-    ("wan.modules.model_s2v", "WanModel_S2V"),
-    ("wan.modules.wan_model", "WanModel_S2V"),
-    ("wan", "WanModel_S2V"),
+    ("wan.modules.s2v.model_s2v", "WanModel_S2V"),
 )
 
 
@@ -702,9 +699,51 @@ def check_wan22_safetensors_shard(allow_load_file_cpu: bool = False) -> dict:
     return wan22_safetensors_shard_check(allow_load_file_cpu=allow_load_file_cpu)
 
 
-def locate_wan_model_s2v_class() -> dict:
+def locate_wan_s2v_runtime_path() -> dict:
     if str(WAN22_REPO_DIR) not in sys.path:
         sys.path.insert(0, str(WAN22_REPO_DIR))
+    klass = None
+    result = {
+        "status": "started",
+        "generate_entrypoint": {},
+        "wan_package": {},
+        "wan_s2v_pipeline": {},
+        "noise_model": {},
+    }
+    result["generate_entrypoint"] = safe_import_module("generate", WAN22_REPO_DIR)
+    result["wan_package"] = safe_import_module("wan", WAN22_REPO_DIR)
+    try:
+        import wan
+
+        wan_s2v_class = getattr(wan, "WanS2V")
+        wan_s2v_init = getattr(wan_s2v_class, "__init__", None)
+        try:
+            wan_s2v_signature = str(inspect.signature(wan_s2v_init)) if callable(wan_s2v_init) else ""
+        except Exception as signature_exc:
+            wan_s2v_signature = f"<signature_unavailable:{type(signature_exc).__name__}>"
+        result["wan_s2v_pipeline"] = {
+            "status": "ok",
+            "module": str(getattr(wan_s2v_class, "__module__", "") or ""),
+            "class_name": "WanS2V",
+            "class_qualname": str(getattr(wan_s2v_class, "__qualname__", "WanS2V") or "WanS2V"),
+            "module_file": str(sys.modules.get(getattr(wan_s2v_class, "__module__", ""), object()).__dict__.get("__file__", "")),
+            "init_signature": wan_s2v_signature,
+            "real_init_noise_model_call": (
+                "WanModel_S2V.from_pretrained(checkpoint_dir, "
+                "torch_dtype=config.param_dtype, device_map=torch.device('cuda:{device_id}'))"
+            ),
+        }
+    except Exception as exc:
+        traceback_lines = traceback.format_exc().splitlines()
+        result["wan_s2v_pipeline"] = {
+            "status": "failed",
+            "module": "wan",
+            "class_name": "WanS2V",
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:1000],
+            "traceback_tail": traceback_lines[-8:],
+        }
+
     attempts = []
     for module_name, class_name in WAN_MODEL_S2V_CLASS_CANDIDATES:
         attempt = {
@@ -730,7 +769,7 @@ def locate_wan_model_s2v_class() -> dict:
                     "from_pretrained_signature": signature,
                 }
             )
-            return {"status": "ok", "selected": attempt, "attempts": attempts + [attempt], "class": klass}
+            attempt["_class"] = klass
         except Exception as exc:
             traceback_lines = traceback.format_exc().splitlines()
             attempt.update(
@@ -741,8 +780,21 @@ def locate_wan_model_s2v_class() -> dict:
                     "traceback_tail": traceback_lines[-8:],
                 }
             )
-            attempts.append(attempt)
-    return {"status": "failed", "selected": {}, "attempts": attempts, "class": None}
+        attempts.append(attempt)
+    selected = next((attempt for attempt in attempts if attempt.get("status") == "ok"), {})
+    klass = selected.pop("_class", None) if selected else None
+    result["noise_model"] = {
+        "status": "ok" if selected else "failed",
+        "selected": selected,
+        "attempts": attempts,
+    }
+    result["status"] = (
+        "ok"
+        if result["wan_s2v_pipeline"].get("status") == "ok" and result["noise_model"]["status"] == "ok"
+        else "failed"
+    )
+    result["_class"] = klass
+    return result
 
 
 def wan22_checkpoint_inventory(model_dir: Path) -> dict:
@@ -777,6 +829,8 @@ def sanitize_dispatch_kwargs(kwargs: dict[str, Any]) -> dict:
     sanitized = {}
     for key, value in kwargs.items():
         if key == "torch_dtype":
+            sanitized[key] = str(value)
+        elif key == "device_map":
             sanitized[key] = str(value)
         else:
             sanitized[key] = value
@@ -834,11 +888,11 @@ def wan22_accelerate_dispatch_check(apply_safetensors_cuda_to_cpu_patch: bool = 
             "transformers": package_version("transformers"),
         },
         "checkpoint_inventory": checkpoint_inventory,
-        "device_map": {"": "cuda:0"},
+        "device_map": "cuda:0",
         "offload": False,
-        "dtype": "torch.bfloat16",
-        "low_cpu_mem_usage": True,
-        "local_files_only": True,
+        "dtype": "",
+        "low_cpu_mem_usage": "not_forwarded_by_real_wan_s2v_path",
+        "local_files_only": "not_forwarded_by_real_wan_s2v_path",
         "download_attempted": False,
         "downloads_attempted": False,
         "loads_full_model": True,
@@ -853,9 +907,9 @@ def wan22_accelerate_dispatch_check(apply_safetensors_cuda_to_cpu_patch: bool = 
         return result
     patch_result = install_optional_safetensors_cuda_to_cpu_patch(apply_safetensors_cuda_to_cpu_patch)
     result["safetensors_cuda_to_cpu_patch"] = patch_result
-    locate_result = locate_wan_model_s2v_class()
-    klass = locate_result.pop("class", None)
-    result["wan_model_s2v_import"] = locate_result
+    locate_result = locate_wan_s2v_runtime_path()
+    klass = locate_result.pop("_class", None)
+    result["wan_s2v_runtime_path"] = locate_result
     if locate_result.get("status") != "ok" or klass is None:
         result["status"] = "failed_import_wan_model_s2v"
         return result
@@ -863,19 +917,32 @@ def wan22_accelerate_dispatch_check(apply_safetensors_cuda_to_cpu_patch: bool = 
     model_obj = None
     try:
         import torch
+        from wan.configs import WAN_CONFIGS
+
+        cfg = WAN_CONFIGS["s2v-14B"]
+        device_map = torch.device("cuda:0")
 
         dispatch_kwargs = {
-            "torch_dtype": torch.bfloat16,
-            "device_map": {"": "cuda:0"},
-            "low_cpu_mem_usage": True,
-            "local_files_only": True,
+            "torch_dtype": cfg.param_dtype,
+            "device_map": device_map,
+        }
+        result["dtype"] = str(cfg.param_dtype)
+        result["config"] = {
+            "task": "s2v-14B",
+            "param_dtype": str(cfg.param_dtype),
+            "t5_checkpoint": str(getattr(cfg, "t5_checkpoint", "")),
+            "vae_checkpoint": str(getattr(cfg, "vae_checkpoint", "")),
+            "transformer": {
+                "motion_frames": getattr(getattr(cfg, "transformer", {}), "motion_frames", None),
+            },
         }
         result["from_pretrained_call"] = {
             "class_module": str(getattr(klass, "__module__", "") or ""),
             "class_qualname": str(getattr(klass, "__qualname__", "") or ""),
             "pretrained_model_name_or_path": str(model_dir),
             "kwargs": sanitize_dispatch_kwargs(dispatch_kwargs),
-            "purpose": "diagnose accelerate/diffusers checkpoint dispatch only; no sampling or generate call",
+            "matches_real_wan_s2v_init_noise_model_call": True,
+            "purpose": "diagnose WanS2V noise_model checkpoint dispatch only; no WanS2V.generate, sampling, audio encode, VAE decode, or video save",
         }
         model_obj = klass.from_pretrained(str(model_dir), **dispatch_kwargs)
         result["status"] = "dispatch_succeeded"

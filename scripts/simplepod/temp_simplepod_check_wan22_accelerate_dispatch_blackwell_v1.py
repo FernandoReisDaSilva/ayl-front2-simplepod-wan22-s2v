@@ -7,7 +7,7 @@ import temp_simplepod_check_safetensors_device_blackwell_v1 as base
 TEST_ID = "TEMP_SIMPLEPOD_CHECK_WAN22_ACCELERATE_DISPATCH_BLACKWELL_V1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_wan22_accelerate_dispatch_blackwell_v1.json"
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.13-blackwell"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.14-blackwell"
 CHECK_ENDPOINT = "/admin/check-wan22-accelerate-dispatch"
 RUNTIME_VERSION = "v2-blackwell-wan22-accelerate-dispatch-diagnostic"
 GPU_POLICY = "blackwell_full_96gb_accelerate_dispatch_diagnostic_policy"
@@ -17,8 +17,10 @@ ORIGINAL_BUILD_REPORT = base.build_report
 def summarize_accelerate_dispatch(value) -> dict:
     if not isinstance(value, dict):
         return {"json_type": type(value).__name__}
-    import_result = value.get("wan_model_s2v_import", {})
+    runtime_path = value.get("wan_s2v_runtime_path", {})
+    import_result = runtime_path.get("noise_model", {}) if isinstance(runtime_path, dict) else {}
     selected_import = import_result.get("selected", {}) if isinstance(import_result, dict) else {}
+    wan_s2v_pipeline = runtime_path.get("wan_s2v_pipeline", {}) if isinstance(runtime_path, dict) else {}
     from_pretrained_result = value.get("from_pretrained_result", {})
     checkpoint_inventory = value.get("checkpoint_inventory", {})
     return {
@@ -36,6 +38,15 @@ def summarize_accelerate_dispatch(value) -> dict:
             "safetensors_sample": checkpoint_inventory.get("safetensors_sample", [])[:5],
             "index_json_files": checkpoint_inventory.get("index_json_files", [])[:5],
             "config_json_files": checkpoint_inventory.get("config_json_files", [])[:5],
+        },
+        "wan_s2v_runtime_path_status": runtime_path.get("status") if isinstance(runtime_path, dict) else "",
+        "wan_s2v_pipeline": {
+            "status": wan_s2v_pipeline.get("status", ""),
+            "module": wan_s2v_pipeline.get("module", ""),
+            "class_name": wan_s2v_pipeline.get("class_name", ""),
+            "module_file": wan_s2v_pipeline.get("module_file", ""),
+            "init_signature": wan_s2v_pipeline.get("init_signature", ""),
+            "real_init_noise_model_call": wan_s2v_pipeline.get("real_init_noise_model_call", ""),
         },
         "wan_model_s2v_import_status": import_result.get("status") if isinstance(import_result, dict) else "",
         "wan_model_s2v_import_selected": {
