@@ -25,6 +25,7 @@ RUNTIME_PATCH_REPORT = {
         "attention_backend_used": "",
         "attention_patch_status": "not_attempted",
         "attention_patch_calls_count": 0,
+        "patched_modules": [],
     },
 }
 
@@ -169,6 +170,7 @@ def install_scoped_from_pretrained_patch() -> None:
 
 def install_sdpa_attention_fallback_patch():
     import wan.modules.attention as attention_module
+    import wan.modules.model as model_module
     import wan.modules.s2v.model_s2v as model_s2v_module
 
     flash2 = bool(getattr(attention_module, "FLASH_ATTN_2_AVAILABLE", False))
@@ -189,6 +191,7 @@ def install_sdpa_attention_fallback_patch():
         return lambda: None
 
     original_attention_flash = attention_module.flash_attention
+    original_model_flash = getattr(model_module, "flash_attention", None)
     original_model_s2v_flash = getattr(model_s2v_module, "flash_attention", None)
 
     def sdpa_flash_attention_compat(
@@ -225,18 +228,26 @@ def install_sdpa_attention_fallback_patch():
         )
 
     attention_module.flash_attention = sdpa_flash_attention_compat
+    model_module.flash_attention = sdpa_flash_attention_compat
     model_s2v_module.flash_attention = sdpa_flash_attention_compat
     state.update(
         {
             "attention_fallback_applied": True,
             "attention_backend_used": "torch_sdpa",
             "attention_patch_status": "applied",
+            "patched_modules": [
+                "wan.modules.attention.flash_attention",
+                "wan.modules.model.flash_attention",
+                "wan.modules.s2v.model_s2v.flash_attention",
+            ],
         }
     )
     update_patch_report("attention_sdpa_patch", state)
 
     def restore():
         attention_module.flash_attention = original_attention_flash
+        if original_model_flash is not None:
+            model_module.flash_attention = original_model_flash
         if original_model_s2v_flash is not None:
             model_s2v_module.flash_attention = original_model_s2v_flash
         state["attention_patch_status"] = "restored"
