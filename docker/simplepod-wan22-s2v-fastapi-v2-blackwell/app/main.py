@@ -436,6 +436,15 @@ def health() -> dict:
     }
 
 
+@app.get("/")
+def root() -> dict:
+    return {
+        "service": SERVICE_NAME,
+        "status": "ok",
+        "hint": "use /health, /gpu, or admin endpoints",
+    }
+
+
 @app.get("/gpu")
 def gpu() -> dict:
     return torch_probe()

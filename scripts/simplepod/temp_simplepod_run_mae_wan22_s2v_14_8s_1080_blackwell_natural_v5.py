@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_mae_wan22_s2v_14_8s_1080_blackwell_natural_v5_inference_v1.json"
 
 TEMPLATE_ID = 25138
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.16-blackwell"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.17-blackwell"
 STABLE_TEMPLATE_ID = 25114
 STABLE_IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6"
 DATACENTER = "EU-PL-01"
@@ -268,6 +268,7 @@ def summarize_inference(value) -> dict:
         "supported_parameter_fields",
         "unsupported_parameter_fields",
         "safetensors_cuda_to_cpu_patch",
+        "attention_sdpa_patch",
     )
     summary = {key: value.get(key) for key in keys if key in value}
     primary = value.get("primary_inference")

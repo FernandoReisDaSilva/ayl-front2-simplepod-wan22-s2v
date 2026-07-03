@@ -9,6 +9,24 @@ WAN22_REPO_DIR = Path("/opt/Wan2.2")
 TARGET_SIZE = "1080*1080"
 SAFETENSORS_CUDA_TO_CPU_ENV = "AYL_SAFETENSORS_CUDA_TO_CPU_PATCH"
 SAFETENSORS_PATCH_REPORT_ENV = "AYL_SAFETENSORS_PATCH_REPORT_PATH"
+RUNTIME_PATCH_REPORT = {
+    "safetensors_cuda_to_cpu_patch": {
+        "patch_requested": False,
+        "patch_applied": False,
+        "patched_calls_count": 0,
+        "redirected_devices": [],
+    },
+    "attention_sdpa_patch": {
+        "attention_backend_requested": "auto",
+        "flash_attn_available": None,
+        "flash_attn_2_available": None,
+        "flash_attn_3_available": None,
+        "attention_fallback_applied": False,
+        "attention_backend_used": "",
+        "attention_patch_status": "not_attempted",
+        "attention_patch_calls_count": 0,
+    },
+}
 
 
 def should_redirect_device(device):
@@ -105,6 +123,11 @@ def write_patch_report(report: dict) -> None:
     target.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def update_patch_report(section: str, payload: dict) -> None:
+    RUNTIME_PATCH_REPORT.setdefault(section, {}).update(payload)
+    write_patch_report(RUNTIME_PATCH_REPORT)
+
+
 def install_scoped_from_pretrained_patch() -> None:
     patch_requested = os.getenv(SAFETENSORS_CUDA_TO_CPU_ENV, "") == "1"
     from wan.modules.s2v.model_s2v import WanModel_S2V
@@ -124,23 +147,102 @@ def install_scoped_from_pretrained_patch() -> None:
                 "status": "succeeded",
                 **parameter_device_summary(model_obj),
             }
-            write_patch_report(report)
+            update_patch_report("safetensors_cuda_to_cpu_patch", report)
             return model_obj
         except Exception as exc:
             if "active_patch_state" in locals():
                 patch_state = dict(active_patch_state)
-            write_patch_report(
+            update_patch_report(
+                "safetensors_cuda_to_cpu_patch",
                 {
                     **patch_state,
                     "status": "failed",
                     "error_type": type(exc).__name__,
                     "error_truncated": str(exc)[:1000],
-                }
+                },
             )
             raise
 
     WanModel_S2V.from_pretrained = patched_from_pretrained
     return lambda: setattr(WanModel_S2V, "from_pretrained", original_from_pretrained)
+
+
+def install_sdpa_attention_fallback_patch():
+    import wan.modules.attention as attention_module
+    import wan.modules.s2v.model_s2v as model_s2v_module
+
+    flash2 = bool(getattr(attention_module, "FLASH_ATTN_2_AVAILABLE", False))
+    flash3 = bool(getattr(attention_module, "FLASH_ATTN_3_AVAILABLE", False))
+    flash_available = flash2 or flash3
+    state = {
+        "attention_backend_requested": "auto",
+        "flash_attn_available": flash_available,
+        "flash_attn_2_available": flash2,
+        "flash_attn_3_available": flash3,
+        "attention_fallback_applied": False,
+        "attention_backend_used": "flash_attention" if flash_available else "",
+        "attention_patch_status": "not_needed_flash_attention_available" if flash_available else "started",
+        "attention_patch_calls_count": 0,
+    }
+    if flash_available:
+        update_patch_report("attention_sdpa_patch", state)
+        return lambda: None
+
+    original_attention_flash = attention_module.flash_attention
+    original_model_s2v_flash = getattr(model_s2v_module, "flash_attention", None)
+
+    def sdpa_flash_attention_compat(
+        q,
+        k,
+        v,
+        q_lens=None,
+        k_lens=None,
+        dropout_p=0.0,
+        softmax_scale=None,
+        q_scale=None,
+        causal=False,
+        window_size=(-1, -1),
+        deterministic=False,
+        dtype=None,
+        version=None,
+    ):
+        state["attention_patch_calls_count"] += 1
+        state["attention_backend_used"] = "torch_sdpa"
+        return attention_module.attention(
+            q=q,
+            k=k,
+            v=v,
+            q_lens=q_lens,
+            k_lens=k_lens,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            q_scale=q_scale,
+            causal=causal,
+            window_size=window_size,
+            deterministic=deterministic,
+            dtype=dtype or q.dtype,
+            fa_version=version,
+        )
+
+    attention_module.flash_attention = sdpa_flash_attention_compat
+    model_s2v_module.flash_attention = sdpa_flash_attention_compat
+    state.update(
+        {
+            "attention_fallback_applied": True,
+            "attention_backend_used": "torch_sdpa",
+            "attention_patch_status": "applied",
+        }
+    )
+    update_patch_report("attention_sdpa_patch", state)
+
+    def restore():
+        attention_module.flash_attention = original_attention_flash
+        if original_model_s2v_flash is not None:
+            model_s2v_module.flash_attention = original_model_s2v_flash
+        state["attention_patch_status"] = "restored"
+        update_patch_report("attention_sdpa_patch", state)
+
+    return restore
 
 
 def ensure_supported_size(supported_sizes: dict, task: str, size: str) -> None:
@@ -168,13 +270,16 @@ def main() -> int:
     MAX_AREA_CONFIGS[TARGET_SIZE] = 1080 * 1080
     ensure_supported_size(SUPPORTED_SIZES, "s2v-14B", TARGET_SIZE)
     restore_from_pretrained = install_scoped_from_pretrained_patch()
+    restore_attention_patch = install_sdpa_attention_fallback_patch()
 
     args = generate._parse_args()
     generate._validate_args(args)
     try:
         generate.generate(args)
     finally:
+        restore_attention_patch()
         restore_from_pretrained()
+        write_patch_report(RUNTIME_PATCH_REPORT)
     return 0
 
 

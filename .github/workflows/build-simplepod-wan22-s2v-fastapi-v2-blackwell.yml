@@ -6,7 +6,7 @@ on:
       image_tag:
         description: "Experimental Blackwell image tag."
         required: true
-        default: "0.2.16-blackwell"
+        default: "0.2.17-blackwell"
         type: string
 
 permissions:
@@ -52,10 +52,26 @@ jobs:
           print("app.main import OK")
           PY
 
-      - name: Build and publish Blackwell image
-        uses: docker/build-push-action@v6
-        with:
-          context: docker/simplepod-wan22-s2v-fastapi-v2-blackwell
-          file: docker/simplepod-wan22-s2v-fastapi-v2-blackwell/Dockerfile
-          push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}
+      - name: Build Blackwell image
+        run: |
+          docker build \
+            -f docker/simplepod-wan22-s2v-fastapi-v2-blackwell/Dockerfile \
+            -t "${IMAGE_NAME}:${{ inputs.image_tag }}" \
+            docker/simplepod-wan22-s2v-fastapi-v2-blackwell
+
+      - name: Validate runtime optional imports inside image
+        run: |
+          docker run --rm "${IMAGE_NAME}:${{ inputs.image_tag }}" python - <<'PY'
+          import torch, diffusers, accelerate, safetensors, transformers
+          print("torch", torch.__version__)
+          print("torch_cuda", getattr(torch.version, "cuda", ""))
+          for m in ["flash_attn","xformers","triton","decord","librosa","soundfile","moviepy","einops","peft","dashscope"]:
+              try:
+                  __import__(m)
+                  print(m, "OK")
+              except Exception as e:
+                  print(m, "FAIL", type(e).__name__, str(e)[:160])
+          PY
+
+      - name: Push Blackwell image
+        run: docker push "${IMAGE_NAME}:${{ inputs.image_tag }}"

@@ -248,6 +248,21 @@ def read_json_if_exists(path: Path) -> dict:
         }
 
 
+def split_runtime_patch_report(path: Path) -> dict:
+    payload = read_json_if_exists(path)
+    if "safetensors_cuda_to_cpu_patch" in payload or "attention_sdpa_patch" in payload:
+        return {
+            "raw": payload,
+            "safetensors_cuda_to_cpu_patch": payload.get("safetensors_cuda_to_cpu_patch", {}),
+            "attention_sdpa_patch": payload.get("attention_sdpa_patch", {}),
+        }
+    return {
+        "raw": payload,
+        "safetensors_cuda_to_cpu_patch": payload,
+        "attention_sdpa_patch": {},
+    }
+
+
 def run_command(command: list[str], timeout_seconds: int) -> dict:
     monitor = GpuMonitor()
     started = time.monotonic()
@@ -275,6 +290,7 @@ def run_command(command: list[str], timeout_seconds: int) -> dict:
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
         status = "succeeded" if completed.returncode == 0 else "oom" if is_oom_result(stdout, stderr) else "failed"
+        patch_report = split_runtime_patch_report(patch_report_path)
         return {
             "status": status,
             "returncode": completed.returncode,
@@ -282,11 +298,14 @@ def run_command(command: list[str], timeout_seconds: int) -> dict:
             "stdout_truncated": truncate_output(stdout),
             "stderr_truncated": truncate_output(stderr),
             "telemetry": monitor.summary(),
-            "safetensors_cuda_to_cpu_patch": read_json_if_exists(patch_report_path),
+            "runtime_patch_report": patch_report["raw"],
+            "safetensors_cuda_to_cpu_patch": patch_report["safetensors_cuda_to_cpu_patch"],
+            "attention_sdpa_patch": patch_report["attention_sdpa_patch"],
         }
     except subprocess.TimeoutExpired as exc:
         stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
         stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+        patch_report = split_runtime_patch_report(patch_report_path)
         return {
             "status": "timeout",
             "returncode": None,
@@ -294,7 +313,9 @@ def run_command(command: list[str], timeout_seconds: int) -> dict:
             "stdout_truncated": truncate_output(stdout),
             "stderr_truncated": truncate_output(stderr),
             "telemetry": monitor.summary(),
-            "safetensors_cuda_to_cpu_patch": read_json_if_exists(patch_report_path),
+            "runtime_patch_report": patch_report["raw"],
+            "safetensors_cuda_to_cpu_patch": patch_report["safetensors_cuda_to_cpu_patch"],
+            "attention_sdpa_patch": patch_report["attention_sdpa_patch"],
         }
     finally:
         monitor.stop()
@@ -466,6 +487,7 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
         primary_result = run_command(primary_command, int(payload.get("timeout_seconds") or 7200))
         report["primary_inference"] = primary_result
         report["safetensors_cuda_to_cpu_patch"] = primary_result.get("safetensors_cuda_to_cpu_patch", {})
+        report["attention_sdpa_patch"] = primary_result.get("attention_sdpa_patch", {})
         report["command"] = primary_command
         report.update(primary_result.get("telemetry", {}))
 
@@ -488,6 +510,10 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
             report["safetensors_cuda_to_cpu_patch"] = fallback_result.get(
                 "safetensors_cuda_to_cpu_patch",
                 report.get("safetensors_cuda_to_cpu_patch", {}),
+            )
+            report["attention_sdpa_patch"] = fallback_result.get(
+                "attention_sdpa_patch",
+                report.get("attention_sdpa_patch", {}),
             )
             report["fallback_command"] = fallback_command
             selected_output = output_960
