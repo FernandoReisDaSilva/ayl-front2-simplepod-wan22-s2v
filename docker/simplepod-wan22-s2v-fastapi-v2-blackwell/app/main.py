@@ -6,6 +6,8 @@ import importlib.metadata
 import os
 import subprocess
 import sys
+import threading
+import time
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
@@ -82,6 +84,9 @@ RUN_JOB_OPTIONAL_FIELDS = (
     "num_frames",
     "timeout_seconds",
 )
+ASYNC_JOBS_LOCK = threading.Lock()
+ASYNC_JOBS: dict[str, dict[str, Any]] = {}
+ASYNC_RUNNING_JOB_ID: str | None = None
 RELEVANT_PACKAGES = (
     "torch",
     "torchvision",
@@ -424,6 +429,111 @@ def validate_run_job_payload(payload: Any) -> dict:
             },
         )
     return payload
+
+
+def summarize_run_job_report(report: Any) -> dict:
+    if not isinstance(report, dict):
+        return {"json_type": type(report).__name__}
+    keys = (
+        "job_id",
+        "status",
+        "message",
+        "requested_resolution",
+        "actual_generation_resolution",
+        "fallback_used",
+        "fps",
+        "target_duration_seconds",
+        "output_video_key",
+        "output_report_key",
+        "runtime_seconds",
+        "peak_vram_gb",
+        "estimated_cost",
+        "inference_executed",
+        "placeholder_generated",
+        "video_generated",
+        "r2_upload_attempted",
+        "report_uploaded_to_r2",
+        "error_type",
+        "error_truncated",
+        "error_message_truncated",
+        "r2_env_check_status",
+        "r2_reference_head_status",
+        "r2_audio_head_status",
+        "r2_upload_permission_check_status",
+        "received_parameters",
+        "forwarded_parameters",
+        "unsupported_parameters",
+        "supported_parameter_fields",
+        "unsupported_parameter_fields",
+        "safetensors_cuda_to_cpu_patch",
+        "attention_sdpa_patch",
+        "attention_backend_used",
+        "attention_fallback_applied",
+        "attention_patch_status",
+        "attention_patch_calls_count",
+        "attention_patched_modules",
+    )
+    summary = {key: report.get(key) for key in keys if key in report}
+    attention = report.get("attention_sdpa_patch")
+    if isinstance(attention, dict):
+        summary.setdefault("attention_backend_used", attention.get("attention_backend_used"))
+        summary.setdefault("attention_fallback_applied", attention.get("attention_fallback_applied"))
+        summary.setdefault("attention_patch_status", attention.get("attention_patch_status"))
+        summary.setdefault("attention_patch_calls_count", attention.get("attention_patch_calls_count"))
+        summary.setdefault("attention_patched_modules", attention.get("patched_modules", []))
+    primary = report.get("primary_inference")
+    if isinstance(primary, dict):
+        summary["subprocess_returncode"] = primary.get("returncode")
+        summary["stdout_truncated"] = primary.get("stdout_truncated", "")
+        summary["stderr_truncated"] = primary.get("stderr_truncated", "")
+    return summary
+
+
+def async_job_snapshot(job_id: str) -> dict:
+    with ASYNC_JOBS_LOCK:
+        job = ASYNC_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail={"message": "Async job not found.", "job_id": job_id})
+        return dict(job)
+
+
+def update_async_job(job_id: str, **updates: Any) -> None:
+    with ASYNC_JOBS_LOCK:
+        if job_id in ASYNC_JOBS:
+            ASYNC_JOBS[job_id].update(updates)
+
+
+def run_async_wan22_job(job_id: str, payload: dict[str, Any]) -> None:
+    global ASYNC_RUNNING_JOB_ID
+    started_monotonic = time.monotonic()
+    update_async_job(job_id, status="running", started_at=now_iso())
+    try:
+        report = run_wan22_s2v_single_job(payload)
+        terminal_status = "succeeded" if isinstance(report, dict) and report.get("status") in {"succeeded", "succeeded_with_960_fallback"} else "failed"
+        update_async_job(
+            job_id,
+            status=terminal_status,
+            finished_at=now_iso(),
+            runtime_seconds=round(time.monotonic() - started_monotonic, 3),
+            summary=summarize_run_job_report(report),
+            error_type=None if terminal_status == "succeeded" else (report.get("error_type") if isinstance(report, dict) else "unknown"),
+            error_truncated=None if terminal_status == "succeeded" else (report.get("error_truncated") if isinstance(report, dict) else ""),
+            result=report if isinstance(report, dict) else {},
+        )
+    except Exception as exc:
+        update_async_job(
+            job_id,
+            status="failed",
+            finished_at=now_iso(),
+            runtime_seconds=round(time.monotonic() - started_monotonic, 3),
+            summary={},
+            error_type=type(exc).__name__,
+            error_truncated=str(exc)[:1000],
+        )
+    finally:
+        with ASYNC_JOBS_LOCK:
+            if ASYNC_RUNNING_JOB_ID == job_id:
+                ASYNC_RUNNING_JOB_ID = None
 
 
 @app.get("/health")
@@ -1260,6 +1370,85 @@ def verify_wan22_s2v_runtime() -> dict:
         "inference_executed": False,
         "video_generated": False,
         "placeholder_generated": False,
+    }
+
+
+@app.post("/admin/run-mae-wan22-s2v-async", status_code=202)
+def run_mae_wan22_s2v_async(payload: dict[str, Any]) -> dict:
+    global ASYNC_RUNNING_JOB_ID
+    require_admin_verify_enabled()
+    job_payload = validate_run_job_payload(payload)
+    settings = get_settings()
+    model_inventory = directory_inventory(settings.wan22_s2v_model_dir)
+    if not model_inventory["exists"] or not model_inventory["is_dir"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Wan2.2 S2V model directory is missing.",
+                "model_dir": str(settings.wan22_s2v_model_dir),
+                "model_inventory": model_inventory,
+            },
+        )
+    if not r2_env_ready():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "R2 env is not configured for input/output.",
+                "r2_env_present_redacted": r2_env_alias_presence(),
+            },
+        )
+
+    job_id = str(job_payload["job_id"])
+    created_at = now_iso()
+    with ASYNC_JOBS_LOCK:
+        if ASYNC_RUNNING_JOB_ID:
+            running_job = ASYNC_JOBS.get(ASYNC_RUNNING_JOB_ID, {})
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "A Wan2.2 S2V async job is already running.",
+                    "running_job_id": ASYNC_RUNNING_JOB_ID,
+                    "running_status": running_job.get("status"),
+                    "status_url": f"/admin/jobs/{ASYNC_RUNNING_JOB_ID}",
+                },
+            )
+        ASYNC_RUNNING_JOB_ID = job_id
+        ASYNC_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": created_at,
+            "started_at": None,
+            "finished_at": None,
+            "runtime_seconds": None,
+            "summary": {},
+            "error_type": None,
+            "error_truncated": None,
+        }
+
+    thread = threading.Thread(target=run_async_wan22_job, args=(job_id, dict(job_payload)), daemon=True)
+    thread.start()
+    return {
+        "status": "accepted",
+        "job_id": job_id,
+        "created_at": created_at,
+        "status_url": f"/admin/jobs/{job_id}",
+    }
+
+
+@app.get("/admin/jobs/{job_id}")
+def get_async_job(job_id: str) -> dict:
+    require_admin_verify_enabled()
+    job = async_job_snapshot(job_id)
+    return {
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "created_at": job.get("created_at"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "runtime_seconds": job.get("runtime_seconds"),
+        "summary": job.get("summary", {}),
+        "error_type": job.get("error_type"),
+        "error_truncated": job.get("error_truncated"),
     }
 
 

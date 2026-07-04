@@ -263,6 +263,16 @@ def split_runtime_patch_report(path: Path) -> dict:
     }
 
 
+def apply_attention_patch_summary(report: dict, patch_report: dict) -> None:
+    attention = patch_report if isinstance(patch_report, dict) else {}
+    report["attention_sdpa_patch"] = attention
+    report["attention_backend_used"] = attention.get("attention_backend_used")
+    report["attention_fallback_applied"] = attention.get("attention_fallback_applied")
+    report["attention_patch_status"] = attention.get("attention_patch_status")
+    report["attention_patch_calls_count"] = attention.get("attention_patch_calls_count")
+    report["attention_patched_modules"] = attention.get("patched_modules", [])
+
+
 def run_command(command: list[str], timeout_seconds: int) -> dict:
     monitor = GpuMonitor()
     started = time.monotonic()
@@ -487,7 +497,7 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
         primary_result = run_command(primary_command, int(payload.get("timeout_seconds") or 7200))
         report["primary_inference"] = primary_result
         report["safetensors_cuda_to_cpu_patch"] = primary_result.get("safetensors_cuda_to_cpu_patch", {})
-        report["attention_sdpa_patch"] = primary_result.get("attention_sdpa_patch", {})
+        apply_attention_patch_summary(report, primary_result.get("attention_sdpa_patch", {}))
         report["command"] = primary_command
         report.update(primary_result.get("telemetry", {}))
 
@@ -511,9 +521,9 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
                 "safetensors_cuda_to_cpu_patch",
                 report.get("safetensors_cuda_to_cpu_patch", {}),
             )
-            report["attention_sdpa_patch"] = fallback_result.get(
-                "attention_sdpa_patch",
-                report.get("attention_sdpa_patch", {}),
+            apply_attention_patch_summary(
+                report,
+                fallback_result.get("attention_sdpa_patch", report.get("attention_sdpa_patch", {})),
             )
             report["fallback_command"] = fallback_command
             selected_output = output_960

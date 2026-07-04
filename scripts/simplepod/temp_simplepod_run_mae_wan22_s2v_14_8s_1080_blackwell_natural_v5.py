@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_mae_wan22_s2v_14_8s_1080_blackwell_natural_v5_inference_v1.json"
 
 TEMPLATE_ID = 25138
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.18-blackwell"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.19-blackwell"
 STABLE_TEMPLATE_ID = 25114
 STABLE_IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6"
 DATACENTER = "EU-PL-01"
@@ -28,6 +28,7 @@ MODEL_DIR = "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B"
 HF_HOME = "/mnt/ayl_models/caches/huggingface"
 VERIFY_ENDPOINT = "/admin/verify-wan22-s2v-runtime"
 INFERENCE_ENDPOINT = "/jobs/wan22-s2v/run"
+ASYNC_INFERENCE_ENDPOINT = "/admin/run-mae-wan22-s2v-async"
 GPU_POLICY = "blackwell_full_96gb_inference_policy"
 
 JOB_ID = "mae_fr_wan22_s2v_14_8s_1080_blackwell_natural_v5_native_partial"
@@ -197,6 +198,46 @@ def simple_post(url: str, payload: dict, timeout_seconds: int) -> dict:
         }
 
 
+def simple_get(url: str, timeout_seconds: int) -> dict:
+    request = Request(
+        url,
+        method="GET",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "ayl-front2-simplepod-mae-wan22-s2v-blackwell-v1",
+        },
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            body = response.read(262_144)
+            content_type = response.headers.get("Content-Type", "")
+            return {
+                "status": "succeeded",
+                "http_status_code": response.status,
+                "content_type": content_type,
+                "body_bytes": len(body),
+                "json": parse_json_body(body, content_type),
+            }
+    except HTTPError as exc:
+        body = exc.read(262_144)
+        content_type = exc.headers.get("Content-Type", "") if exc.headers else ""
+        return {
+            "status": "failed",
+            "http_status_code": exc.code,
+            "content_type": content_type,
+            "body_bytes": len(body),
+            "error_type": "HTTPError",
+            "error_truncated": str(exc)[:1000],
+            "json": parse_json_body(body, content_type),
+        }
+    except (TimeoutError, URLError) as exc:
+        return {
+            "status": "timeout" if isinstance(exc, TimeoutError) else "failed",
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:1000],
+        }
+
+
 def summarize_runtime_verify(value) -> dict:
     if not isinstance(value, dict):
         return {"json_type": type(value).__name__}
@@ -269,6 +310,11 @@ def summarize_inference(value) -> dict:
         "unsupported_parameter_fields",
         "safetensors_cuda_to_cpu_patch",
         "attention_sdpa_patch",
+        "attention_backend_used",
+        "attention_fallback_applied",
+        "attention_patch_status",
+        "attention_patch_calls_count",
+        "attention_patched_modules",
     )
     summary = {key: value.get(key) for key in keys if key in value}
     primary = value.get("primary_inference")
@@ -292,6 +338,56 @@ def r2_preflight_from_inference(value) -> dict:
         "r2_audio_head_status": value.get("r2_audio_head_status"),
         "r2_upload_permission_check_status": value.get("r2_upload_permission_check_status"),
     }
+
+
+def poll_async_job(proxy_url: str, job_id: str, args: argparse.Namespace) -> dict:
+    started = time.monotonic()
+    attempts = []
+    status_url = proxy_url + f"/admin/jobs/{job_id}"
+    while True:
+        elapsed = round(time.monotonic() - started, 3)
+        if elapsed > args.job_timeout_seconds:
+            return {
+                "status": "timeout",
+                "job_id": job_id,
+                "elapsed_seconds": elapsed,
+                "attempts": attempts[-20:],
+                "error_type": "JobTimeout",
+                "error_truncated": f"Async job did not finish within {args.job_timeout_seconds}s.",
+            }
+        result = simple_get(status_url, timeout_seconds=30)
+        body = result.get("json")
+        job_status = body.get("status") if isinstance(body, dict) else result.get("status")
+        attempts.append(
+            {
+                "elapsed_seconds": elapsed,
+                "http_status_code": result.get("http_status_code"),
+                "job_status": job_status,
+                "error_type": result.get("error_type", ""),
+            }
+        )
+        print(f"[{TEST_ID}] job_status={job_status} elapsed={int(elapsed)}s")
+        if isinstance(body, dict) and job_status in {"succeeded", "failed"}:
+            return {
+                "status": "succeeded",
+                "http_status_code": result.get("http_status_code"),
+                "job_id": job_id,
+                "elapsed_seconds": elapsed,
+                "attempts": attempts[-20:],
+                "json": body,
+            }
+        if result.get("status") not in {"succeeded", "timeout"} and result.get("http_status_code") != 404:
+            return {
+                "status": "failed",
+                "http_status_code": result.get("http_status_code"),
+                "job_id": job_id,
+                "elapsed_seconds": elapsed,
+                "attempts": attempts[-20:],
+                "error_type": result.get("error_type", ""),
+                "error_truncated": result.get("error_truncated", ""),
+                "json": body,
+            }
+        time.sleep(max(1, args.job_poll_interval_seconds))
 
 
 def is_full_blackwell_inference_candidate(item: dict) -> tuple[bool, str]:
@@ -485,6 +581,12 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
         "runtime_verify_result": data.get("runtime_verify_result", {}),
         "r2_preflight_result": data.get("r2_preflight_result", {}),
         "inference_result": data.get("inference_result", {}),
+        "async_inference_endpoint": ASYNC_INFERENCE_ENDPOINT,
+        "async_job_id": data.get("async_job_id", ""),
+        "async_job_start_result": data.get("async_job_start_result", {}),
+        "async_job_poll_result": data.get("async_job_poll_result", {}),
+        "job_timeout_seconds": args.job_timeout_seconds,
+        "job_poll_interval_seconds": args.job_poll_interval_seconds,
         "output_video_key": OUTPUT_VIDEO_KEY,
         "output_report_key": OUTPUT_REPORT_KEY,
         "payload_dryrun": inference_payload(),
@@ -527,10 +629,20 @@ def blocked_status(args: argparse.Namespace) -> str:
 
 
 def run(args: argparse.Namespace) -> int:
-    data = {}
+    data = {
+        "delete_result": {
+            "attempted": False,
+            "status": "not_started",
+            "http_status_code": None,
+            "error_type": "",
+            "error_truncated": "",
+        }
+    }
     timer = PhaseTimer()
     data["phase_timings"] = timer.phases
     instance_id = None
+    proxy_url = ""
+    async_job_id = ""
     api_key = ""
     base_url = smoke.DEFAULT_BASE_URL
     started_monotonic = time.monotonic()
@@ -678,24 +790,56 @@ def run(args: argparse.Namespace) -> int:
             print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
             return 1
 
-        with timer.phase("run_inference_endpoint"):
-            inference_result = simple_post(
-                proxy_url + INFERENCE_ENDPOINT,
+        with timer.phase("start_async_inference_job"):
+            async_start_result = simple_post(
+                proxy_url + ASYNC_INFERENCE_ENDPOINT,
                 inference_payload(),
-                args.inference_timeout_seconds,
+                60,
             )
-        body = inference_result.get("json")
-        data["r2_preflight_result"] = r2_preflight_from_inference(body)
+        async_start_body = async_start_result.get("json")
+        data["async_job_start_result"] = {
+            "attempted": True,
+            "status": async_start_result.get("status"),
+            "http_status_code": async_start_result.get("http_status_code"),
+            "error_type": async_start_result.get("error_type", ""),
+            "error_truncated": async_start_result.get("error_truncated", ""),
+            "json": async_start_body,
+        }
+        if async_start_result.get("http_status_code") not in {200, 202} or not isinstance(async_start_body, dict):
+            status = "failed_start_async_inference_job"
+            data["_status_for_finally"] = status
+            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
+            write_json(REPORT_PATH, build_report(args, status, data))
+            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
+            return 1
+        async_job_id = str(async_start_body.get("job_id") or "")
+        data["async_job_id"] = async_job_id
+        if async_start_body.get("status") != "accepted" or not async_job_id:
+            status = "async_inference_not_accepted"
+            data["_status_for_finally"] = status
+            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
+            write_json(REPORT_PATH, build_report(args, status, data))
+            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
+            return 1
+
+        with timer.phase("poll_async_inference_job"):
+            async_poll_result = poll_async_job(proxy_url, async_job_id, args)
+        data["async_job_poll_result"] = async_poll_result
+        body = async_poll_result.get("json")
+        job_summary = body.get("summary", {}) if isinstance(body, dict) else {}
+        data["r2_preflight_result"] = r2_preflight_from_inference(job_summary)
         data["inference_result"] = {
             "attempted": True,
-            "status": inference_result.get("status"),
-            "http_status_code": inference_result.get("http_status_code"),
-            "error_type": inference_result.get("error_type", ""),
-            "error_truncated": inference_result.get("error_truncated", ""),
-            "summary": summarize_inference(body),
+            "mode": "async_polling",
+            "status": body.get("status") if isinstance(body, dict) else async_poll_result.get("status"),
+            "http_status_code": async_poll_result.get("http_status_code"),
+            "error_type": (body.get("error_type") if isinstance(body, dict) else async_poll_result.get("error_type", "")) or "",
+            "error_truncated": (body.get("error_truncated") if isinstance(body, dict) else async_poll_result.get("error_truncated", "")) or "",
+            "summary": summarize_inference(job_summary),
+            "job_status": body,
         }
 
-        status = "succeeded" if isinstance(body, dict) and body.get("video_generated") is True else "failed_inference_endpoint"
+        status = "succeeded" if isinstance(job_summary, dict) and job_summary.get("video_generated") is True else "failed_inference_endpoint"
         data["_status_for_finally"] = status
         data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
         write_json(REPORT_PATH, build_report(args, status, data))
@@ -703,7 +847,25 @@ def run(args: argparse.Namespace) -> int:
         return 0 if status == "succeeded" else 1
     except KeyboardInterrupt:
         status = "interrupted_delete_attempted" if instance_id is not None else "interrupted"
+        if proxy_url and async_job_id:
+            last_job_status = simple_get(proxy_url + f"/admin/jobs/{async_job_id}", timeout_seconds=20)
+            data["last_async_job_status_on_interrupt"] = last_job_status
+            if "inference_result" not in data:
+                body = last_job_status.get("json")
+                summary = body.get("summary", {}) if isinstance(body, dict) else {}
+                data["inference_result"] = {
+                    "attempted": True,
+                    "mode": "async_polling",
+                    "status": body.get("status") if isinstance(body, dict) else "interrupted",
+                    "http_status_code": last_job_status.get("http_status_code"),
+                    "error_type": "KeyboardInterrupt",
+                    "error_truncated": "Interrupted locally after async job was started.",
+                    "summary": summarize_inference(summary),
+                    "job_status": body,
+                }
+                data["r2_preflight_result"] = r2_preflight_from_inference(summary)
         data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
+        data["_status_for_finally"] = status
         write_json(REPORT_PATH, build_report(args, status, data, "KeyboardInterrupt"))
         print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}", file=sys.stderr)
         return 130
@@ -715,9 +877,21 @@ def run(args: argparse.Namespace) -> int:
         return 1
     finally:
         if instance_id is not None:
-            with timer.phase("delete_instance"):
-                delete_path = smoke.DELETE_INSTANCE_PATH.format(id=instance_id)
-                delete_result = smoke.http_request(base_url, delete_path, api_key, method="DELETE")
+            delete_path = smoke.DELETE_INSTANCE_PATH.format(id=instance_id)
+            try:
+                with timer.phase("delete_instance"):
+                    delete_result = smoke.http_request(base_url, delete_path, api_key, method="DELETE")
+            except Exception as delete_exc:
+                delete_result = {
+                    "attempted": True,
+                    "status": "failed",
+                    "method": "DELETE",
+                    "path": delete_path,
+                    "http_status_code": None,
+                    "endpoint_host": base_url,
+                    "error_type": type(delete_exc).__name__,
+                    "error_truncated": str(delete_exc)[:1000],
+                }
             data["delete_result"] = {
                 key: delete_result.get(key)
                 for key in ("attempted", "status", "method", "path", "http_status_code", "endpoint_host", "error_type", "error_truncated")
@@ -725,6 +899,7 @@ def run(args: argparse.Namespace) -> int:
             final_status = data.get("_status_for_finally")
             if delete_result.get("http_status_code") not in {200, 202, 204}:
                 final_status = "delete_failed_manual_required"
+                print(f"[{TEST_ID}] DELETE FAILED - manual cleanup required instance_id={instance_id}", file=sys.stderr)
             if final_status:
                 data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
                 write_json(REPORT_PATH, build_report(args, final_status, data))
@@ -741,6 +916,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-interval-seconds", type=int, default=5)
     parser.add_argument("--ready-timeout-seconds", type=int, default=300)
     parser.add_argument("--inference-timeout-seconds", type=int, default=7200)
+    parser.add_argument("--job-timeout-seconds", type=int, default=3600)
+    parser.add_argument("--job-poll-interval-seconds", type=int, default=30)
     return parser.parse_args()
 
 
