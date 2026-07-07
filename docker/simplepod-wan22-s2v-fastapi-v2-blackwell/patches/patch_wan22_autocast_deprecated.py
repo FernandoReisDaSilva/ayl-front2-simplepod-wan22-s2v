@@ -48,7 +48,8 @@ def main() -> int:
         total += patch_file(path, args.dry_run)
 
     if total == 0:
-        raise RuntimeError("No deprecated autocast calls were found to patch.")
+        print("No deprecated autocast calls found; patch noop.")
+        return 0
     print(f"total autocast replacements={total}")
     return 0
 
