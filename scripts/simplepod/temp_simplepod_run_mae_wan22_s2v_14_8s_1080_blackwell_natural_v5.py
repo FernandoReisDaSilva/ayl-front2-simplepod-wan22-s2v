@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_mae_wan22_s2v_14_8s_1080_blackwell_natural_v5_inference_v1.json"
 
 TEMPLATE_ID = 25138
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.19-blackwell"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.20-blackwell"
 STABLE_TEMPLATE_ID = 25114
 STABLE_IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6"
 DATACENTER = "EU-PL-01"
@@ -308,10 +308,20 @@ def summarize_inference(value) -> dict:
         return {"json_type": type(value).__name__}
     keys = (
         "job_id",
+        "job_status",
         "status",
         "message",
+        "width",
+        "height",
+        "resolution",
+        "requested_width",
+        "requested_height",
         "requested_resolution",
+        "requested_resolution_detail",
         "actual_generation_resolution",
+        "output_width",
+        "output_height",
+        "output_resolution",
         "fallback_used",
         "fps",
         "target_duration_seconds",
@@ -343,6 +353,8 @@ def summarize_inference(value) -> dict:
         "attention_patch_status",
         "attention_patch_calls_count",
         "attention_patched_modules",
+        "max_concurrent_jobs",
+        "active_jobs_at_submission",
     )
     summary = {key: value.get(key) for key in keys if key in value}
     primary = value.get("primary_inference")
@@ -601,6 +613,11 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
         "status": status,
         "error": error,
         "dry_run": not execute_allowed,
+        "job_id": inference_summary.get("job_id") or payload["job_id"],
+        "job_status": inference_summary.get("job_status"),
+        "width": inference_summary.get("width", requested_width),
+        "height": inference_summary.get("height", requested_height),
+        "resolution": inference_summary.get("resolution", requested_resolution),
         "requested_width": requested_width,
         "requested_height": requested_height,
         "requested_resolution": requested_resolution,

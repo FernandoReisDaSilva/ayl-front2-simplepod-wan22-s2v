@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/mnt/ayl_models/caches/huggingface \
     WAN22_REPO_DIR=/opt/Wan2.2 \
     TORCH_CUDA_ARCH_LIST="12.0" \
-    AYL_IMAGE_TAG=0.2.19-blackwell
+    AYL_IMAGE_TAG=0.2.20-blackwell
 
 WORKDIR /opt/ayl-simplepod-wan22-s2v-fastapi-v2
 
@@ -25,6 +25,9 @@ COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
 RUN git clone --depth 1 https://github.com/Wan-Video/Wan2.2.git /opt/Wan2.2
+
+COPY patches ./patches
+RUN python patches/patch_wan22_autocast_deprecated.py /opt/Wan2.2
 
 COPY app ./app
 
