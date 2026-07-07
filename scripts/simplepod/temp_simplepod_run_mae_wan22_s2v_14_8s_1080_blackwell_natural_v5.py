@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_mae_wan22_s2v_14_8s_1080_blackwell_natural_v5_inference_v1.json"
 
 TEMPLATE_ID = 25138
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.21-blackwell"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.22-blackwell"
 STABLE_TEMPLATE_ID = 25114
 STABLE_IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.1.6"
 DATACENTER = "EU-PL-01"
@@ -107,7 +107,7 @@ def missing_local_r2_env() -> list[str]:
 
 
 def r2_env_variables_for_instance() -> list[dict]:
-    return [{"name": key, "value": os.getenv(key, "")} for key in LOCAL_R2_ENV_KEYS]
+    return [{"name": key, "value": os.getenv(key, "")} for key in LOCAL_R2_ENV_KEYS if os.getenv(key, "")]
 
 
 def r2_value(*names: str, default: str = "") -> str:
@@ -291,7 +291,7 @@ def inference_payload(args: argparse.Namespace) -> dict:
 
 
 def runtime_payload(instance_market: str) -> dict:
-    return {
+    payload = {
         "gpuCount": 1,
         "instanceMarket": instance_market or "<selected_full_blackwell_96gb_market>",
         "instanceTemplate": f"/instances/templates/{TEMPLATE_ID}",
@@ -308,6 +308,10 @@ def runtime_payload(instance_market: str) -> dict:
             *r2_env_variables_for_instance(),
         ],
     }
+    payload["envVariables"] = [
+        item for item in payload["envVariables"] if item.get("value") not in ("", None)
+    ]
+    return payload
 
 
 def parse_json_body(body: bytes, content_type: str):
@@ -936,11 +940,26 @@ def run(args: argparse.Namespace) -> int:
             return 1
 
         with timer.phase("start_instance"):
-            start_result = smoke.http_request(base_url, smoke.START_INSTANCE_PATH, api_key, method="POST", payload=runtime_payload(market))
+            start_payload = runtime_payload(market)
+            start_result = smoke.http_request(base_url, smoke.START_INSTANCE_PATH, api_key, method="POST", payload=start_payload)
         data["start_result"] = {
             key: start_result.get(key)
-            for key in ("attempted", "status", "method", "path", "http_status_code", "endpoint_host", "error_type", "error_truncated")
+            for key in (
+                "attempted",
+                "status",
+                "method",
+                "path",
+                "http_status_code",
+                "endpoint_host",
+                "content_type",
+                "body_bytes",
+                "error_type",
+                "error_truncated",
+                "response_body_truncated",
+            )
         }
+        data["start_result"]["request_payload_redacted"] = redact_instance_payload(start_payload)
+        data["start_result"]["json"] = start_result.get("json")
         instance_id = smoke.extract_instance_id(start_result.get("json"))
         data["instance_id"] = instance_id
         if start_result.get("status") != "succeeded" or instance_id is None:

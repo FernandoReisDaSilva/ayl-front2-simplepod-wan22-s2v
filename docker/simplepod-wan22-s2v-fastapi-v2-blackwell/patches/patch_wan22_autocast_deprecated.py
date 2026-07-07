@@ -13,6 +13,8 @@ def patch_text(text: str) -> tuple[str, int]:
     replacements = (
         ("torch.cuda.amp.autocast()", 'torch.amp.autocast("cuda")'),
         ("torch.cuda.amp.autocast(", 'torch.amp.autocast("cuda", '),
+        ("@amp.autocast()", '@torch.amp.autocast("cuda")'),
+        ("@amp.autocast(", '@torch.amp.autocast("cuda", '),
     )
     patched = text
     total = 0
@@ -21,7 +23,25 @@ def patch_text(text: str) -> tuple[str, int]:
         if count:
             patched = patched.replace(old, new)
             total += count
+    if total and "@torch.amp.autocast" in patched and not has_import_torch(patched):
+        patched = add_import_torch(patched)
     return patched, total
+
+
+def has_import_torch(text: str) -> bool:
+    return any(line.strip() == "import torch" for line in text.splitlines())
+
+
+def add_import_torch(text: str) -> str:
+    marker = "from torch.cuda import amp"
+    if marker in text:
+        return text.replace(marker, f"import torch\n{marker}", 1)
+    lines = text.splitlines()
+    insert_at = 0
+    while insert_at < len(lines) and (lines[insert_at].startswith("#") or not lines[insert_at].strip()):
+        insert_at += 1
+    lines.insert(insert_at, "import torch")
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
 
 
 def patch_file(path: Path, dry_run: bool) -> int:

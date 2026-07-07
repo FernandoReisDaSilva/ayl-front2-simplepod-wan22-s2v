@@ -6,7 +6,7 @@ on:
       image_tag:
         description: "Experimental Blackwell image tag."
         required: true
-        default: "0.2.21-blackwell"
+        default: "0.2.22-blackwell"
         type: string
 
 permissions:
