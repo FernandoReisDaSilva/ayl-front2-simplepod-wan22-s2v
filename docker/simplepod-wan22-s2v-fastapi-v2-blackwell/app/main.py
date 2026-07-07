@@ -50,6 +50,7 @@ INFERENCE_CONFIRMATIONS = {
     "RUN_WAN22_S2V_MAE_14_8S_1080_BLACKWELL_NATURAL_V5",
     "RUN_WAN22_S2V_MAE_14_8S_1080_BLACKWELL_NATURAL_V5_NATIVE_PARTIAL",
     "RUN_WAN22_S2V_MAE_14_8S_720_BLACKWELL_NATURAL_V5_NATIVE_PARTIAL",
+    "RUN_WAN22_S2V_BLACKWELL_NATIVE_PARTIAL",
 }
 ADMIN_DOWNLOAD_ENV = "AYL_ENABLE_ADMIN_DOWNLOADS"
 ADMIN_VERIFY_ENV = "AYL_ENABLE_ADMIN_VERIFY"
@@ -421,15 +422,9 @@ def validate_run_job_payload(payload: Any) -> dict:
             matches = value == expected
         if not matches:
             mismatches[key] = {"expected": expected, "received": value}
-    allowed_job_ids = {
-        "mae_fr_wan22_s2v_14_8s_1080_v1",
-        "mae_fr_wan22_s2v_14_8s_1080_blackwell_v1",
-        "mae_fr_wan22_s2v_14_8s_1080_blackwell_natural_v5",
-        "mae_fr_wan22_s2v_14_8s_1080_blackwell_natural_v5_native_partial",
-        "mae_fr_wan22_s2v_14_8s_720_blackwell_natural_v5_native_partial",
-    }
-    if payload.get("job_id") not in allowed_job_ids:
-        mismatches["job_id"] = {"expected_one_of": sorted(allowed_job_ids), "received": payload.get("job_id")}
+    job_id = str(payload.get("job_id", ""))
+    if not job_id or len(job_id) > 160 or not all(char.isalnum() or char in "-_" for char in job_id):
+        mismatches["job_id"] = {"expected": "1-160 chars using letters, numbers, dash, underscore", "received": payload.get("job_id")}
     try:
         width = int(payload.get("target_width"))
         height = int(payload.get("target_height"))
