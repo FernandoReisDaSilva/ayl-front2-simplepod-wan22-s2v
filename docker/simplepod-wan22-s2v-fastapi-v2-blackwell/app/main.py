@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 
 from .r2_client import r2_env_alias_presence, r2_env_ready
 from .reporting import file_facts, now_iso, stub_final_report
@@ -48,6 +49,7 @@ INFERENCE_CONFIRMATIONS = {
     "RUN_WAN22_S2V_MAE_14_8S_1080_BLACKWELL",
     "RUN_WAN22_S2V_MAE_14_8S_1080_BLACKWELL_NATURAL_V5",
     "RUN_WAN22_S2V_MAE_14_8S_1080_BLACKWELL_NATURAL_V5_NATIVE_PARTIAL",
+    "RUN_WAN22_S2V_MAE_14_8S_720_BLACKWELL_NATURAL_V5_NATIVE_PARTIAL",
 }
 ADMIN_DOWNLOAD_ENV = "AYL_ENABLE_ADMIN_DOWNLOADS"
 ADMIN_VERIFY_ENV = "AYL_ENABLE_ADMIN_VERIFY"
@@ -86,7 +88,7 @@ RUN_JOB_OPTIONAL_FIELDS = (
 )
 ASYNC_JOBS_LOCK = threading.Lock()
 ASYNC_JOBS: dict[str, dict[str, Any]] = {}
-ASYNC_RUNNING_JOB_ID: str | None = None
+ASYNC_RUNNING_JOB_IDS: set[str] = set()
 RELEVANT_PACKAGES = (
     "torch",
     "torchvision",
@@ -374,6 +376,18 @@ def validate_job_payload(payload: Any) -> dict:
 def validate_run_job_payload(payload: Any) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=422, detail="Job body must be a JSON object.")
+    payload = dict(payload)
+    if payload.get("target_width") in ("", None) and payload.get("width") in ("", None) and isinstance(payload.get("resolution"), str):
+        try:
+            width_text, height_text = payload["resolution"].lower().replace("*", "x").split("x", 1)
+            payload["width"] = width_text
+            payload["height"] = height_text
+        except ValueError:
+            pass
+    if payload.get("target_width") in ("", None) and payload.get("width") not in ("", None):
+        payload["target_width"] = payload["width"]
+    if payload.get("target_height") in ("", None) and payload.get("height") not in ("", None):
+        payload["target_height"] = payload["height"]
     if payload.get("confirm_inference") not in INFERENCE_CONFIRMATIONS:
         raise HTTPException(
             status_code=422,
@@ -394,12 +408,7 @@ def validate_run_job_payload(payload: Any) -> dict:
                 "optional": list(RUN_JOB_OPTIONAL_FIELDS),
             },
         )
-    expected_values = {
-        "target_width": 1080,
-        "target_height": 1080,
-        "fps": 16,
-        "target_duration_seconds": 14.8,
-    }
+    expected_values = {"fps": 16, "target_duration_seconds": 14.8}
     mismatches = {}
     for key, expected in expected_values.items():
         value = payload.get(key)
@@ -417,9 +426,26 @@ def validate_run_job_payload(payload: Any) -> dict:
         "mae_fr_wan22_s2v_14_8s_1080_blackwell_v1",
         "mae_fr_wan22_s2v_14_8s_1080_blackwell_natural_v5",
         "mae_fr_wan22_s2v_14_8s_1080_blackwell_natural_v5_native_partial",
+        "mae_fr_wan22_s2v_14_8s_720_blackwell_natural_v5_native_partial",
     }
     if payload.get("job_id") not in allowed_job_ids:
         mismatches["job_id"] = {"expected_one_of": sorted(allowed_job_ids), "received": payload.get("job_id")}
+    try:
+        width = int(payload.get("target_width"))
+        height = int(payload.get("target_height"))
+    except (TypeError, ValueError):
+        mismatches["resolution"] = {"expected": "integer target_width/target_height or width/height", "received": {
+            "target_width": payload.get("target_width"),
+            "target_height": payload.get("target_height"),
+        }}
+    else:
+        if width <= 0 or height <= 0 or width > 1080 or height > 1080:
+            mismatches["resolution"] = {"expected": "positive width/height up to 1080", "received": {"width": width, "height": height}}
+        payload["target_width"] = width
+        payload["target_height"] = height
+        payload["width"] = width
+        payload["height"] = height
+        payload["resolution"] = f"{width}x{height}"
     if mismatches:
         raise HTTPException(
             status_code=422,
@@ -436,10 +462,17 @@ def summarize_run_job_report(report: Any) -> dict:
         return {"json_type": type(report).__name__}
     keys = (
         "job_id",
+        "job_status",
         "status",
+        "width",
+        "height",
+        "resolution",
         "message",
         "requested_resolution",
         "actual_generation_resolution",
+        "output_resolution",
+        "output_width",
+        "output_height",
         "fallback_used",
         "fps",
         "target_duration_seconds",
@@ -472,6 +505,8 @@ def summarize_run_job_report(report: Any) -> dict:
         "attention_patch_status",
         "attention_patch_calls_count",
         "attention_patched_modules",
+        "max_concurrent_jobs",
+        "active_jobs_at_submission",
     )
     summary = {key: report.get(key) for key in keys if key in report}
     attention = report.get("attention_sdpa_patch")
@@ -504,7 +539,6 @@ def update_async_job(job_id: str, **updates: Any) -> None:
 
 
 def run_async_wan22_job(job_id: str, payload: dict[str, Any]) -> None:
-    global ASYNC_RUNNING_JOB_ID
     started_monotonic = time.monotonic()
     update_async_job(job_id, status="running", started_at=now_iso())
     try:
@@ -532,8 +566,7 @@ def run_async_wan22_job(job_id: str, payload: dict[str, Any]) -> None:
         )
     finally:
         with ASYNC_JOBS_LOCK:
-            if ASYNC_RUNNING_JOB_ID == job_id:
-                ASYNC_RUNNING_JOB_ID = None
+            ASYNC_RUNNING_JOB_IDS.discard(job_id)
 
 
 @app.get("/health")
@@ -1375,7 +1408,6 @@ def verify_wan22_s2v_runtime() -> dict:
 
 @app.post("/admin/run-mae-wan22-s2v-async", status_code=202)
 def run_mae_wan22_s2v_async(payload: dict[str, Any]) -> dict:
-    global ASYNC_RUNNING_JOB_ID
     require_admin_verify_enabled()
     job_payload = validate_run_job_payload(payload)
     settings = get_settings()
@@ -1401,18 +1433,21 @@ def run_mae_wan22_s2v_async(payload: dict[str, Any]) -> dict:
     job_id = str(job_payload["job_id"])
     created_at = now_iso()
     with ASYNC_JOBS_LOCK:
-        if ASYNC_RUNNING_JOB_ID:
-            running_job = ASYNC_JOBS.get(ASYNC_RUNNING_JOB_ID, {})
-            raise HTTPException(
+        active_job_ids = sorted(ASYNC_RUNNING_JOB_IDS)
+        active_jobs_at_submission = len(active_job_ids)
+        if active_jobs_at_submission >= settings.max_concurrent_jobs:
+            return JSONResponse(
                 status_code=409,
-                detail={
-                    "message": "A Wan2.2 S2V async job is already running.",
-                    "running_job_id": ASYNC_RUNNING_JOB_ID,
-                    "running_status": running_job.get("status"),
-                    "status_url": f"/admin/jobs/{ASYNC_RUNNING_JOB_ID}",
+                content={
+                    "status": "rejected",
+                    "reason": "max_concurrent_jobs_reached",
+                    "max_concurrent_jobs": settings.max_concurrent_jobs,
+                    "active_job_ids": active_job_ids,
                 },
             )
-        ASYNC_RUNNING_JOB_ID = job_id
+        job_payload["max_concurrent_jobs"] = settings.max_concurrent_jobs
+        job_payload["active_jobs_at_submission"] = active_jobs_at_submission
+        ASYNC_RUNNING_JOB_IDS.add(job_id)
         ASYNC_JOBS[job_id] = {
             "job_id": job_id,
             "status": "queued",
@@ -1423,6 +1458,13 @@ def run_mae_wan22_s2v_async(payload: dict[str, Any]) -> dict:
             "summary": {},
             "error_type": None,
             "error_truncated": None,
+            "max_concurrent_jobs": settings.max_concurrent_jobs,
+            "active_jobs_at_submission": active_jobs_at_submission,
+            "width": job_payload["target_width"],
+            "height": job_payload["target_height"],
+            "resolution": job_payload["resolution"],
+            "output_video_key": job_payload["output_video_key"],
+            "output_report_key": job_payload["output_report_key"],
         }
 
     thread = threading.Thread(target=run_async_wan22_job, args=(job_id, dict(job_payload)), daemon=True)
@@ -1432,6 +1474,8 @@ def run_mae_wan22_s2v_async(payload: dict[str, Any]) -> dict:
         "job_id": job_id,
         "created_at": created_at,
         "status_url": f"/admin/jobs/{job_id}",
+        "max_concurrent_jobs": settings.max_concurrent_jobs,
+        "active_jobs_at_submission": active_jobs_at_submission,
     }
 
 
@@ -1449,6 +1493,13 @@ def get_async_job(job_id: str) -> dict:
         "summary": job.get("summary", {}),
         "error_type": job.get("error_type"),
         "error_truncated": job.get("error_truncated"),
+        "width": job.get("width"),
+        "height": job.get("height"),
+        "resolution": job.get("resolution"),
+        "max_concurrent_jobs": job.get("max_concurrent_jobs"),
+        "active_jobs_at_submission": job.get("active_jobs_at_submission"),
+        "output_video_key": job.get("output_video_key"),
+        "output_report_key": job.get("output_report_key"),
     }
 
 

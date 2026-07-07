@@ -402,11 +402,14 @@ def r2_preflight(payload: dict[str, Any]) -> dict:
 def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
     settings = get_settings()
     job_id = str(payload["job_id"])
+    target_width = int(payload["target_width"])
+    target_height = int(payload["target_height"])
+    resolution = f"{target_width}x{target_height}"
     work_dir = WORK_ROOT / job_id
     work_dir.mkdir(parents=True, exist_ok=True)
     input_image = work_dir / "reference.png"
     input_audio = work_dir / "audio.wav"
-    output_1080 = work_dir / f"{job_id}_1080x1080.mp4"
+    output_primary = work_dir / f"{job_id}_{resolution}.mp4"
     output_960 = work_dir / f"{job_id}_960x960.mp4"
     local_report_path = work_dir / "final_report.json"
 
@@ -414,14 +417,23 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
     parameter_resolution = resolve_wan22_parameters(payload)
     report: dict[str, Any] = {
         "job_id": job_id,
+        "job_status": "started",
         "status": "started",
+        "width": target_width,
+        "height": target_height,
+        "resolution": resolution,
+        "max_concurrent_jobs": payload.get("max_concurrent_jobs"),
+        "active_jobs_at_submission": payload.get("active_jobs_at_submission"),
         "created_at": now_iso(),
         "character_id": payload.get("character_id", ""),
         "base_taught_language": payload.get("base_taught_language", ""),
         "reference_image_key": payload["reference_image_key"],
         "audio_key": payload["audio_key"],
-        "requested_resolution": {"width": payload["target_width"], "height": payload["target_height"]},
+        "requested_resolution": {"width": target_width, "height": target_height},
         "actual_generation_resolution": None,
+        "output_width": None,
+        "output_height": None,
+        "output_resolution": None,
         "fallback_resolution": {"width": 960, "height": 960},
         "fallback_used": False,
         "fallback_allowed": bool(payload.get("allow_oom_fallback", False)),
@@ -488,10 +500,10 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
         primary_command = build_command(
             input_image,
             input_audio,
-            output_1080,
+            output_primary,
             settings.wan22_s2v_model_dir,
-            int(payload["target_width"]),
-            int(payload["target_height"]),
+            target_width,
+            target_height,
             parameter_resolution["forwarded_parameters"],
         )
         primary_result = run_command(primary_command, int(payload.get("timeout_seconds") or 7200))
@@ -501,10 +513,14 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
         report["command"] = primary_command
         report.update(primary_result.get("telemetry", {}))
 
-        selected_output = output_1080
-        if primary_result["status"] == "succeeded" and output_1080.exists():
+        selected_output = output_primary
+        if primary_result["status"] == "succeeded" and output_primary.exists():
             report["status"] = "succeeded"
-            report["actual_generation_resolution"] = {"width": payload["target_width"], "height": payload["target_height"]}
+            report["job_status"] = "succeeded"
+            report["actual_generation_resolution"] = {"width": target_width, "height": target_height}
+            report["output_width"] = target_width
+            report["output_height"] = target_height
+            report["output_resolution"] = resolution
         elif primary_result["status"] == "oom" and payload.get("allow_oom_fallback"):
             fallback_command = build_command(
                 input_image,
@@ -530,15 +546,22 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
             report["fallback_used"] = fallback_result["status"] == "succeeded" and output_960.exists()
             if report["fallback_used"]:
                 report["status"] = "succeeded_with_960_fallback"
+                report["job_status"] = "succeeded"
                 report["actual_generation_resolution"] = {"width": 960, "height": 960}
+                report["output_width"] = 960
+                report["output_height"] = 960
+                report["output_resolution"] = "960x960"
                 report.update(fallback_result.get("telemetry", {}))
             else:
                 report["status"] = "failed_oom_fallback_failed"
+                report["job_status"] = "failed"
         elif primary_result["status"] == "oom":
             report["status"] = "failed_oom_1080_no_fallback"
+            report["job_status"] = "failed"
             report["error_type"] = "cuda_oom"
         else:
             report["status"] = "failed_inference"
+            report["job_status"] = "failed"
             report["error_type"] = primary_result["status"]
 
         if report["status"] in {"succeeded", "succeeded_with_960_fallback"} and selected_output.exists():

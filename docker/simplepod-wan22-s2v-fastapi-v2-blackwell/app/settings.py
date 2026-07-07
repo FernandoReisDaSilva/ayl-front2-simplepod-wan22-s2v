@@ -24,6 +24,7 @@ APP_ENV_KEYS = (
     "AYL_ENABLE_ADMIN_DOWNLOADS",
     "AYL_ENABLE_ADMIN_VERIFY",
     "AYL_SAFETENSORS_CUDA_TO_CPU_PATCH",
+    "MAX_CONCURRENT_JOBS",
     "HF_HOME",
     "HF_TOKEN",
     "HUGGING_FACE_HUB_TOKEN",
@@ -46,16 +47,22 @@ class Settings:
     wan22_s2v_model_dir: Path
     image_tag: str
     marker_nonce: str
+    max_concurrent_jobs: int
 
 
 def get_settings() -> Settings:
     models_root = Path(os.getenv("SIMPLEPOD_MODELS_ROOT", "/mnt/ayl-models"))
     model_dir = Path(os.getenv("WAN22_S2V_MODEL_DIR", str(models_root / "wan22_s2v")))
+    try:
+        max_concurrent_jobs = int(os.getenv("MAX_CONCURRENT_JOBS", "1"))
+    except ValueError:
+        max_concurrent_jobs = 1
     return Settings(
         simplepod_models_root=models_root,
         wan22_s2v_model_dir=model_dir,
         image_tag=os.getenv("AYL_IMAGE_TAG", ""),
         marker_nonce=os.getenv("AYL_MARKER_NONCE", ""),
+        max_concurrent_jobs=max(1, max_concurrent_jobs),
     )
 
 

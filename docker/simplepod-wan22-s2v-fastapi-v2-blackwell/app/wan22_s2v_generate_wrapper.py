@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 WAN22_REPO_DIR = Path("/opt/Wan2.2")
-TARGET_SIZE = "1080*1080"
+DEFAULT_TARGET_SIZE = "1080*1080"
 SAFETENSORS_CUDA_TO_CPU_ENV = "AYL_SAFETENSORS_CUDA_TO_CPU_PATCH"
 SAFETENSORS_PATCH_REPORT_ENV = "AYL_SAFETENSORS_PATCH_REPORT_PATH"
 RUNTIME_PATCH_REPORT = {
@@ -270,6 +270,21 @@ def ensure_supported_size(supported_sizes: dict, task: str, size: str) -> None:
         supported_sizes[task] = tuple([*list(existing_sizes), size])
 
 
+def target_size_from_argv() -> tuple[str, int, int]:
+    size = DEFAULT_TARGET_SIZE
+    for index, arg in enumerate(sys.argv):
+        if arg == "--size" and index + 1 < len(sys.argv):
+            size = sys.argv[index + 1]
+            break
+    try:
+        width_text, height_text = size.lower().replace("x", "*").split("*", 1)
+        width = int(width_text)
+        height = int(height_text)
+    except Exception:
+        return DEFAULT_TARGET_SIZE, 1080, 1080
+    return f"{width}*{height}", width, height
+
+
 def main() -> int:
     if str(WAN22_REPO_DIR) not in sys.path:
         sys.path.insert(0, str(WAN22_REPO_DIR))
@@ -277,9 +292,10 @@ def main() -> int:
     import generate
     from wan.configs import SIZE_CONFIGS, MAX_AREA_CONFIGS, SUPPORTED_SIZES
 
-    SIZE_CONFIGS[TARGET_SIZE] = (1080, 1080)
-    MAX_AREA_CONFIGS[TARGET_SIZE] = 1080 * 1080
-    ensure_supported_size(SUPPORTED_SIZES, "s2v-14B", TARGET_SIZE)
+    target_size, target_width, target_height = target_size_from_argv()
+    SIZE_CONFIGS[target_size] = (target_width, target_height)
+    MAX_AREA_CONFIGS[target_size] = target_width * target_height
+    ensure_supported_size(SUPPORTED_SIZES, "s2v-14B", target_size)
     restore_from_pretrained = install_scoped_from_pretrained_patch()
     restore_attention_patch = install_sdpa_attention_fallback_patch()
 

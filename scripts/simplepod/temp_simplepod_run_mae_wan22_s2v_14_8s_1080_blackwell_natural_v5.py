@@ -31,12 +31,12 @@ INFERENCE_ENDPOINT = "/jobs/wan22-s2v/run"
 ASYNC_INFERENCE_ENDPOINT = "/admin/run-mae-wan22-s2v-async"
 GPU_POLICY = "blackwell_full_96gb_inference_policy"
 
-JOB_ID = "mae_fr_wan22_s2v_14_8s_1080_blackwell_natural_v5_native_partial"
+JOB_ID_PREFIX = "mae_fr_wan22_s2v_14_8s"
+JOB_ID_SUFFIX = "blackwell_natural_v5_native_partial"
 REFERENCE_IMAGE_KEY = "tests/simplepod_wan22_s2v/inputs/mae_fr_wan22_s2v_14_8s_1080_v1/reference/Mae_para_Wan_V3.png"
 AUDIO_KEY = "tests/simplepod_wan22_s2v/inputs/mae_fr_wan22_s2v_14_8s_1080_v1/audio/mae_fr_14_8s_cut_for_wan.wav"
-OUTPUT_VIDEO_KEY = "tests/simplepod_wan22_s2v/outputs/mae_fr_wan22_s2v_14_8s_1080_blackwell_natural_v5_native_partial.mp4"
-OUTPUT_REPORT_KEY = "tests/simplepod_wan22_s2v/outputs/mae_fr_wan22_s2v_14_8s_1080_blackwell_natural_v5_native_partial_final_report.json"
-CONFIRM_INFERENCE = "RUN_WAN22_S2V_MAE_14_8S_1080_BLACKWELL_NATURAL_V5_NATIVE_PARTIAL"
+CONFIRM_INFERENCE_1080 = "RUN_WAN22_S2V_MAE_14_8S_1080_BLACKWELL_NATURAL_V5_NATIVE_PARTIAL"
+CONFIRM_INFERENCE_720 = "RUN_WAN22_S2V_MAE_14_8S_720_BLACKWELL_NATURAL_V5_NATIVE_PARTIAL"
 NATURAL_V5_POSITIVE_PROMPT = (
     "stable square close-up talking head portrait of the same woman, natural French speech articulation, "
     "stronger and more active accurate lip sync, clear mouth openings closures rounded vowels and labial consonants, "
@@ -104,20 +104,47 @@ def redact_instance_payload(payload: dict) -> dict:
     return redacted
 
 
-def inference_payload() -> dict:
+def resolution_token(width: int, height: int) -> str:
+    return str(width) if width == height else f"{width}x{height}"
+
+
+def job_id_for_resolution(width: int, height: int) -> str:
+    return f"{JOB_ID_PREFIX}_{resolution_token(width, height)}_{JOB_ID_SUFFIX}"
+
+
+def output_video_key(width: int, height: int) -> str:
+    return f"tests/simplepod_wan22_s2v/outputs/{job_id_for_resolution(width, height)}.mp4"
+
+
+def output_report_key(width: int, height: int) -> str:
+    return f"tests/simplepod_wan22_s2v/outputs/{job_id_for_resolution(width, height)}_final_report.json"
+
+
+def confirm_inference_for_resolution(width: int, height: int) -> str:
+    if width == 720 and height == 720:
+        return CONFIRM_INFERENCE_720
+    return CONFIRM_INFERENCE_1080
+
+
+def inference_payload(args: argparse.Namespace) -> dict:
+    width = int(args.width)
+    height = int(args.height)
     return {
-        "job_id": JOB_ID,
+        "job_id": job_id_for_resolution(width, height),
         "character_id": "mae",
         "base_taught_language": "FR",
         "reference_image_key": REFERENCE_IMAGE_KEY,
         "audio_key": AUDIO_KEY,
-        "target_width": 1080,
-        "target_height": 1080,
+        "width": width,
+        "height": height,
+        "target_width": width,
+        "target_height": height,
+        "resolution": f"{width}x{height}",
         "fps": 16,
         "target_duration_seconds": 14.8,
-        "output_video_key": OUTPUT_VIDEO_KEY,
-        "output_report_key": OUTPUT_REPORT_KEY,
-        "confirm_inference": CONFIRM_INFERENCE,
+        "output_video_key": output_video_key(width, height),
+        "output_report_key": output_report_key(width, height),
+        "confirm_inference": confirm_inference_for_resolution(width, height),
         "allow_oom_fallback": False,
         "positive_prompt": NATURAL_V5_POSITIVE_PROMPT,
         "negative_prompt": NATURAL_V5_NEGATIVE_PROMPT,
@@ -140,6 +167,7 @@ def runtime_payload(instance_market: str) -> dict:
             {"name": "AYL_ENABLE_ADMIN_VERIFY", "value": "1"},
             {"name": "AYL_RUNTIME_VERSION", "value": "v2-blackwell-mae-natural-v5-inference"},
             {"name": "AYL_SAFETENSORS_CUDA_TO_CPU_PATCH", "value": "1"},
+            {"name": "MAX_CONCURRENT_JOBS", "value": "1"},
             {"name": "PYTHONUNBUFFERED", "value": "1"},
             {"name": "TORCH_CUDA_ARCH_LIST", "value": "12.0"},
             *r2_env_variables_for_instance(),
@@ -559,12 +587,26 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
     execute_allowed = args.execute and args.confirm_start and args.confirm_inference and args.confirm_delete
     selected_summary = selected_summary_from_data(data)
     runtime_seconds = data.get("runtime_seconds")
+    requested_width = int(args.width)
+    requested_height = int(args.height)
+    requested_resolution = f"{requested_width}x{requested_height}"
+    payload = inference_payload(args)
+    inference_summary = data.get("inference_result", {}).get("summary", {})
+    async_start_json = data.get("async_job_start_result", {}).get("json")
+    if not isinstance(async_start_json, dict):
+        async_start_json = {}
     return {
         "test_id": TEST_ID,
         "created_at": now_iso(),
         "status": status,
         "error": error,
         "dry_run": not execute_allowed,
+        "requested_width": requested_width,
+        "requested_height": requested_height,
+        "requested_resolution": requested_resolution,
+        "output_width": inference_summary.get("output_width"),
+        "output_height": inference_summary.get("output_height"),
+        "output_resolution": inference_summary.get("output_resolution"),
         "template_id": TEMPLATE_ID,
         "image_ref": IMAGE,
         "stable_template_unchanged": STABLE_TEMPLATE_ID,
@@ -587,9 +629,11 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
         "async_job_poll_result": data.get("async_job_poll_result", {}),
         "job_timeout_seconds": args.job_timeout_seconds,
         "job_poll_interval_seconds": args.job_poll_interval_seconds,
-        "output_video_key": OUTPUT_VIDEO_KEY,
-        "output_report_key": OUTPUT_REPORT_KEY,
-        "payload_dryrun": inference_payload(),
+        "max_concurrent_jobs": 1,
+        "active_jobs_at_submission": async_start_json.get("active_jobs_at_submission"),
+        "output_video_key": payload["output_video_key"],
+        "output_report_key": payload["output_report_key"],
+        "payload_dryrun": payload,
         "native_partial_reason": NATIVE_PARTIAL_REASON,
         "natural_v5_reference_unsupported_parameters": NATURAL_V5_REFERENCE_UNSUPPORTED_PARAMETERS,
         "r2_env_local_check": data.get("r2_env_local_check", local_r2_env_presence()),
@@ -619,6 +663,10 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
 
 
 def blocked_status(args: argparse.Namespace) -> str:
+    if args.width <= 0 or args.height <= 0:
+        return "blocked_invalid_resolution"
+    if args.width > 1080 or args.height > 1080:
+        return "blocked_resolution_above_1080"
     if args.execute and not args.confirm_start:
         return "blocked_missing_confirm_start"
     if args.execute and not args.confirm_inference:
@@ -650,7 +698,7 @@ def run(args: argparse.Namespace) -> int:
         execute_allowed = args.execute and args.confirm_start and args.confirm_inference and args.confirm_delete
         print(f"[{TEST_ID}] START dry_run={str(not execute_allowed).lower()} template_id={TEMPLATE_ID}")
         print(f"[{TEST_ID}] image_required={IMAGE}")
-        print(f"[{TEST_ID}] gpu_policy={GPU_POLICY} target=1080x1080 allow_oom_fallback=false")
+        print(f"[{TEST_ID}] gpu_policy={GPU_POLICY} target={args.width}x{args.height} allow_oom_fallback=false")
 
         status = blocked_status(args)
         if status:
@@ -793,7 +841,7 @@ def run(args: argparse.Namespace) -> int:
         with timer.phase("start_async_inference_job"):
             async_start_result = simple_post(
                 proxy_url + ASYNC_INFERENCE_ENDPOINT,
-                inference_payload(),
+                inference_payload(args),
                 60,
             )
         async_start_body = async_start_result.get("json")
@@ -906,12 +954,14 @@ def run(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dry-run or execute Maé Wan2.2 S2V 1080 Blackwell natural_v5 inference gate.")
+    parser = argparse.ArgumentParser(description="Dry-run or execute Maé Wan2.2 S2V Blackwell natural_v5 inference gate.")
     parser.add_argument("--execute", action="store_true", help="Create a real SimplePod instance and call the inference endpoint.")
     parser.add_argument("--confirm-start", action="store_true", help="Required with --execute to start the instance.")
     parser.add_argument("--confirm-inference", action="store_true", help="Required with --execute to call the inference endpoint.")
     parser.add_argument("--confirm-delete", action="store_true", help="Required with --execute to delete the instance at the end.")
     parser.add_argument("--instance-market", default="", help="Optional explicit /instances/market/{id}; runtime still rejects MIG.")
+    parser.add_argument("--width", type=int, default=720, help="Requested generation width. Default: 720.")
+    parser.add_argument("--height", type=int, default=720, help="Requested generation height. Default: 720.")
     parser.add_argument("--detail-attempts", type=int, default=36)
     parser.add_argument("--poll-interval-seconds", type=int, default=5)
     parser.add_argument("--ready-timeout-seconds", type=int, default=300)
