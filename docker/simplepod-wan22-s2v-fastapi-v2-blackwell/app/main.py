@@ -28,9 +28,6 @@ REQUIRED_JOB_FIELDS = ("reference_image_key", "audio_key")
 OPTIONAL_JOB_FIELDS = (
     "output_video_key",
     "final_report_key",
-    "positive_prompt",
-    "negative_prompt",
-    "prompt",
     "seed",
     "steps",
     "cfg",
@@ -73,9 +70,6 @@ RUN_JOB_REQUIRED_FIELDS = (
     "allow_oom_fallback",
 )
 RUN_JOB_OPTIONAL_FIELDS = (
-    "positive_prompt",
-    "negative_prompt",
-    "prompt",
     "seed",
     "steps",
     "cfg",

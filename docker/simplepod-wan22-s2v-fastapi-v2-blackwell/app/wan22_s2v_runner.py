@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .character_prompts import resolve_character_prompts
 from .r2_client import download_file, get_r2_client, head_object, r2_env_alias_presence, r2_env_ready, resolved_r2_env, upload_file
 from .reporting import now_iso
 from .settings import get_settings
@@ -20,9 +21,6 @@ OOM_MARKERS = (
     "cudnn_status_alloc_failed",
 )
 WAN22_PARAMETER_FIELDS = (
-    "positive_prompt",
-    "negative_prompt",
-    "prompt",
     "seed",
     "steps",
     "cfg",
@@ -34,9 +32,6 @@ WAN22_PARAMETER_FIELDS = (
     "num_frames",
 )
 SUPPORTED_WAN22_PARAMETER_FIELDS = (
-    "positive_prompt",
-    "negative_prompt",
-    "prompt",
     "seed",
     "steps",
     "cfg",
@@ -141,11 +136,9 @@ def received_wan22_parameters(payload: dict[str, Any]) -> dict:
 
 def resolve_wan22_parameters(payload: dict[str, Any]) -> dict:
     received = received_wan22_parameters(payload)
-    positive_prompt = str(
-        payload.get("positive_prompt")
-        or payload.get("prompt")
-        or "A natural, stable talking-head lip sync video of Maé speaking French."
-    )
+    prompt_resolution = resolve_character_prompts(str(payload.get("character_id", "")))
+    positive_prompt = prompt_resolution["positive_prompt"]
+    negative_prompt = prompt_resolution["negative_prompt"]
     forwarded = {
         "positive_prompt": positive_prompt,
         "seed": int(payload.get("seed", 42)),
@@ -154,14 +147,16 @@ def resolve_wan22_parameters(payload: dict[str, Any]) -> dict:
         "shift": float(payload.get("shift", 4.0)),
         "offload_model": True,
         "convert_model_dtype": True,
+        "t5_cpu": True,
         "task": "s2v-14B",
     }
-    not_forwarded = {}
-    if payload.get("negative_prompt"):
-        not_forwarded["negative_prompt"] = {
-            "value": str(payload.get("negative_prompt") or ""),
+    not_forwarded = {
+        "negative_prompt": {
+            "value": negative_prompt,
             "reason": "Native Wan2.2 generate.py does not accept --negative_prompt.",
+            "source": "character_prompts.py",
         }
+    }
     unsupported = [
         key
         for key in UNSUPPORTED_NATIVE_WAN22_PARAMETER_FIELDS
@@ -174,6 +169,10 @@ def resolve_wan22_parameters(payload: dict[str, Any]) -> dict:
         "unsupported_parameters": unsupported,
         "supported_parameter_fields": list(SUPPORTED_WAN22_PARAMETER_FIELDS),
         "unsupported_parameter_fields": list(UNSUPPORTED_NATIVE_WAN22_PARAMETER_FIELDS),
+        "prompt_source": {
+            "module": "app.character_prompts",
+            "character_id": prompt_resolution["character_id"],
+        },
     }
 
 
@@ -186,6 +185,7 @@ def build_command(
     height: int,
     forwarded_parameters: dict[str, Any],
 ) -> list[str]:
+    t5_cpu_requested = bool(forwarded_parameters.get("t5_cpu", False))
     command = [
         "python",
         "-m",
@@ -199,6 +199,11 @@ def build_command(
         "--offload_model",
         "True",
         "--convert_model_dtype",
+    ]
+    if t5_cpu_requested:
+        command.append("--t5_cpu")
+    command.extend(
+        [
         "--prompt",
         str(forwarded_parameters["positive_prompt"]),
         "--image",
@@ -207,12 +212,54 @@ def build_command(
         str(audio_path),
         "--save_file",
         str(output_path),
-    ]
+        ]
+    )
     command.extend(["--sample_steps", str(forwarded_parameters["steps"])])
     command.extend(["--sample_shift", str(forwarded_parameters["shift"])])
     command.extend(["--sample_guide_scale", str(forwarded_parameters["cfg"])])
     command.extend(["--base_seed", str(forwarded_parameters["seed"])])
     return command
+
+
+def t5_cpu_command_status(command: list[str], forwarded_parameters: dict[str, Any]) -> dict:
+    requested = bool(forwarded_parameters.get("t5_cpu", False))
+    forwarded = "--t5_cpu" in command
+    return {
+        "t5_cpu_requested": requested,
+        "t5_cpu_forwarded": forwarded,
+        "t5_cpu_effective": requested and forwarded,
+    }
+
+
+def alex_prompt_guard_status(character_id: Any, positive_prompt: str) -> dict:
+    normalized = str(character_id or "").strip().lower()
+    forbidden_terms = ("Maé", "French", "woman")
+    matched = [term for term in forbidden_terms if term in positive_prompt]
+    return {
+        "character_id": normalized,
+        "checked": normalized == "alex",
+        "forbidden_terms": list(forbidden_terms),
+        "matched_terms": matched if normalized == "alex" else [],
+        "passed": normalized != "alex" or not matched,
+    }
+
+
+def finalize_pre_inference_failure(report: dict, payload: dict[str, Any], local_report_path: Path, started: float, status: str, error_type: str, error_text: str) -> dict:
+    report["status"] = status
+    report["job_status"] = status
+    report["error_type"] = error_type
+    report["error_truncated"] = error_text[:1000]
+    report["inference_executed"] = False
+    report["runtime_seconds"] = round(time.monotonic() - started, 3)
+    write_json(local_report_path, report)
+    if r2_env_ready():
+        try:
+            upload_file(local_report_path, payload["output_report_key"])
+            report["report_uploaded_to_r2"] = True
+        except Exception as upload_exc:
+            report["report_upload_error_type"] = type(upload_exc).__name__
+            report["report_upload_error_truncated"] = str(upload_exc)[:1000]
+    return report
 
 
 def command_arg_value(command: list[str], name: str) -> str:
@@ -415,6 +462,20 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
 
     started = time.monotonic()
     parameter_resolution = resolve_wan22_parameters(payload)
+    primary_command = build_command(
+        input_image,
+        input_audio,
+        output_primary,
+        settings.wan22_s2v_model_dir,
+        target_width,
+        target_height,
+        parameter_resolution["forwarded_parameters"],
+    )
+    t5_cpu_status = t5_cpu_command_status(primary_command, parameter_resolution["forwarded_parameters"])
+    prompt_guard_status = alex_prompt_guard_status(
+        payload.get("character_id", ""),
+        str(parameter_resolution["forwarded_parameters"]["positive_prompt"]),
+    )
     report: dict[str, Any] = {
         "job_id": job_id,
         "job_status": "started",
@@ -457,27 +518,53 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
         "unsupported_parameters": parameter_resolution["unsupported_parameters"],
         "supported_parameter_fields": parameter_resolution["supported_parameter_fields"],
         "unsupported_parameter_fields": parameter_resolution["unsupported_parameter_fields"],
+        "prompt_source": parameter_resolution["prompt_source"],
+        "command": primary_command,
+        "t5_cpu_requested": t5_cpu_status["t5_cpu_requested"],
+        "t5_cpu_forwarded": t5_cpu_status["t5_cpu_forwarded"],
+        "t5_cpu_effective": t5_cpu_status["t5_cpu_effective"],
+        "prompt_guard": prompt_guard_status,
     }
 
     try:
-        if parameter_resolution["unsupported_parameters"]:
-            report["status"] = "unsupported_wan22_parameter"
-            report["error_type"] = "unsupported_wan22_parameter"
-            report["error_truncated"] = (
-                "Native Wan2.2 S2V runner does not currently support these payload fields: "
-                + ", ".join(parameter_resolution["unsupported_parameters"])
+        if t5_cpu_status["t5_cpu_requested"] and "--t5_cpu" not in primary_command:
+            return finalize_pre_inference_failure(
+                report,
+                payload,
+                local_report_path,
+                started,
+                "failed_missing_t5_cpu_flag",
+                "missing_t5_cpu_flag",
+                "t5_cpu_requested=true but the final generate.py command does not contain --t5_cpu.",
             )
-            report["inference_executed"] = False
-            report["runtime_seconds"] = round(time.monotonic() - started, 3)
-            write_json(local_report_path, report)
-            if r2_env_ready():
-                try:
-                    upload_file(local_report_path, payload["output_report_key"])
-                    report["report_uploaded_to_r2"] = True
-                except Exception as upload_exc:
-                    report["report_upload_error_type"] = type(upload_exc).__name__
-                    report["report_upload_error_truncated"] = str(upload_exc)[:1000]
-            return report
+
+        if not prompt_guard_status["passed"]:
+            return finalize_pre_inference_failure(
+                report,
+                payload,
+                local_report_path,
+                started,
+                "failed_character_prompt_guard",
+                "character_prompt_guard_failed",
+                (
+                    "character_id=alex resolved to a forbidden prompt containing: "
+                    + ", ".join(prompt_guard_status["matched_terms"])
+                ),
+            )
+
+        if parameter_resolution["unsupported_parameters"]:
+            return finalize_pre_inference_failure(
+                report,
+                payload,
+                local_report_path,
+                started,
+                "unsupported_wan22_parameter",
+                "unsupported_wan22_parameter",
+                (
+                    "Native Wan2.2 S2V runner does not currently support these payload fields: "
+                    + ", ".join(parameter_resolution["unsupported_parameters"])
+                ),
+            )
 
         preflight = r2_preflight(payload)
         report["r2_preflight"] = preflight
@@ -500,20 +587,10 @@ def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
             "audio": file_facts(input_audio),
         }
 
-        primary_command = build_command(
-            input_image,
-            input_audio,
-            output_primary,
-            settings.wan22_s2v_model_dir,
-            target_width,
-            target_height,
-            parameter_resolution["forwarded_parameters"],
-        )
         primary_result = run_command(primary_command, int(payload.get("timeout_seconds") or 7200))
         report["primary_inference"] = primary_result
         report["safetensors_cuda_to_cpu_patch"] = primary_result.get("safetensors_cuda_to_cpu_patch", {})
         apply_attention_patch_summary(report, primary_result.get("attention_sdpa_patch", {}))
-        report["command"] = primary_command
         report.update(primary_result.get("telemetry", {}))
 
         selected_output = output_primary

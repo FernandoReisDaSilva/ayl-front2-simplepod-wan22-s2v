@@ -300,12 +300,41 @@ def main() -> int:
     restore_attention_patch = install_sdpa_attention_fallback_patch()
 
     args = generate._parse_args()
-    generate._validate_args(args)
     try:
+        generate._validate_args(args)
+        if not bool(getattr(args, "t5_cpu", False)):
+            raise RuntimeError("Expected generate.py Namespace t5_cpu=True before Wan2.2 S2V inference.")
         generate.generate(args)
     finally:
         restore_attention_patch()
         restore_from_pretrained()
+        if "pipeline" in locals():
+            del pipeline
+        if "model" in locals():
+            del model
+        import gc
+        import torch
+
+        print("[VRAM_CLEANUP] begin", flush=True)
+        print("[VRAM_CLEANUP] gc.collect()", flush=True)
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            print("[VRAM_CLEANUP] empty_cache()", flush=True)
+            torch.cuda.empty_cache()
+            print("[VRAM_CLEANUP] ipc_collect()", flush=True)
+            torch.cuda.ipc_collect()
+
+        print("[VRAM_CLEANUP] gc.collect()", flush=True)
+        gc.collect()
+
+        if torch.cuda.is_available():
+            print("[VRAM_CLEANUP] empty_cache()", flush=True)
+            torch.cuda.empty_cache()
+            print("[VRAM_CLEANUP] ipc_collect()", flush=True)
+            torch.cuda.ipc_collect()
+        print("[VRAM_CLEANUP] completed", flush=True)
         write_patch_report(RUNTIME_PATCH_REPORT)
     return 0
 
