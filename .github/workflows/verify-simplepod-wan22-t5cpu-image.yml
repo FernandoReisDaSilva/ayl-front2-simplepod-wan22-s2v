@@ -39,7 +39,7 @@ jobs:
       - name: Verify T5 CPU and Alex prompt contract
         run: |
           IMAGE_REF="${IMAGE_NAME}:${EXPECTED_IMAGE_TAG}"
-          docker run --rm \
+          VERIFY_OUTPUT="$(docker run --rm -i \
             -e EXPECTED_IMAGE_TAG="${EXPECTED_IMAGE_TAG}" \
             -e PYTHONPATH="/opt/ayl-simplepod-wan22-s2v-fastapi-v2:/opt/Wan2.2" \
             "${IMAGE_REF}" \
@@ -153,6 +153,14 @@ jobs:
           print(f"cleanup_present={str(cleanup_present).lower()}")
           print(f"verification_status={verification_status}")
           PY
+          )"
+          printf '%s\n' "${VERIFY_OUTPUT}"
+          grep -Fq -- "contains_t5_cpu=true" <<< "${VERIFY_OUTPUT}"
+          grep -Fq -- "canonical_prompt_valid=true" <<< "${VERIFY_OUTPUT}"
+          grep -Fq -- "cleanup_present=true" <<< "${VERIFY_OUTPUT}"
+          grep -Fq -- "verification_status=passed" <<< "${VERIFY_OUTPUT}"
+          grep -Fq -- "--t5_cpu" <<< "${VERIFY_OUTPUT}"
+          grep -Fq -- "natural English speech articulation" <<< "${VERIFY_OUTPUT}"
 
       - name: Summary
         if: always()
