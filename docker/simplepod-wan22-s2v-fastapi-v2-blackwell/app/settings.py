@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 SERVICE_NAME = "ayl-simplepod-wan22-s2v-fastapi-v2"
-SERVICE_VERSION = "0.2.24-blackwell-t5cpu-fix"
+SERVICE_VERSION = "0.2.26-blackwell-t5cpu-fix3"
 
 R2_ENV_KEYS = (
     "R2_ENDPOINT",

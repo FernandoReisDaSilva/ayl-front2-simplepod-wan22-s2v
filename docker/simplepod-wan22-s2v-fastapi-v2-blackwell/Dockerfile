@@ -8,7 +8,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/mnt/ayl_models/caches/huggingface \
     WAN22_REPO_DIR=/opt/Wan2.2 \
     TORCH_CUDA_ARCH_LIST="12.0" \
-    AYL_IMAGE_TAG=0.2.24-blackwell-t5cpu-fix
+    AYL_IMAGE_TAG=0.2.26-blackwell-t5cpu-fix3
 
 WORKDIR /opt/ayl-simplepod-wan22-s2v-fastapi-v2
 

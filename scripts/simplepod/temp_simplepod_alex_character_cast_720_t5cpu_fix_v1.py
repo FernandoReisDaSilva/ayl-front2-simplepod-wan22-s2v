@@ -13,7 +13,7 @@ TEST_ID = "TEMP_SIMPLEPOD_ALEX_CHARACTER_CAST_720_T5CPU_FIX_V1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "alex_character_cast_720_t5cpu_fix_v1_summary.json"
 
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.24-blackwell-t5cpu-fix"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.26-blackwell-t5cpu-fix3"
 MAX_CONCURRENT_JOBS = "1"
 WIDTH = 720
 HEIGHT = 720
@@ -70,7 +70,7 @@ def isolated_runtime_payload(instance_market: str) -> dict:
             item["value"] = MAX_CONCURRENT_JOBS
             found_max_concurrent = True
         if item.get("name") == "AYL_IMAGE_TAG":
-            item["value"] = "0.2.24-blackwell-t5cpu-fix"
+            item["value"] = "0.2.26-blackwell-t5cpu-fix3"
             found_image_tag = True
         if item.get("name") == "AYL_RUNTIME_VERSION":
             item["value"] = "v2-blackwell-t5cpu-fix-v1"
@@ -78,7 +78,7 @@ def isolated_runtime_payload(instance_market: str) -> dict:
     if not found_max_concurrent:
         payload.setdefault("envVariables", []).append({"name": "MAX_CONCURRENT_JOBS", "value": MAX_CONCURRENT_JOBS})
     if not found_image_tag:
-        payload.setdefault("envVariables", []).append({"name": "AYL_IMAGE_TAG", "value": "0.2.24-blackwell-t5cpu-fix"})
+        payload.setdefault("envVariables", []).append({"name": "AYL_IMAGE_TAG", "value": "0.2.26-blackwell-t5cpu-fix3"})
     if not found_runtime_version:
         payload.setdefault("envVariables", []).append(
             {"name": "AYL_RUNTIME_VERSION", "value": "v2-blackwell-t5cpu-fix-v1"}

@@ -6,7 +6,7 @@ on:
       image_tag:
         description: "Image tag to verify"
         required: true
-        default: "0.2.25-blackwell-t5cpu-fix2"
+        default: "0.2.26-blackwell-t5cpu-fix3"
 
 permissions:
   contents: read
