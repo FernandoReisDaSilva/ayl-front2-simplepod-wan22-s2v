@@ -1,0 +1,161 @@
+name: Verify SimplePod Wan2.2 T5 CPU Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to verify"
+        required: true
+        default: "0.2.25-blackwell-t5cpu-fix2"
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  IMAGE_NAME: ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2
+  EXPECTED_IMAGE_TAG: ${{ inputs.image_tag }}
+
+jobs:
+  verify-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Pull image
+        run: |
+          docker pull "${IMAGE_NAME}:${EXPECTED_IMAGE_TAG}"
+
+      - name: Inspect pulled image
+        id: inspect
+        run: |
+          IMAGE_REF="${IMAGE_NAME}:${EXPECTED_IMAGE_TAG}"
+          IMAGE_DIGEST="$(docker image inspect "${IMAGE_REF}" --format '{{index .RepoDigests 0}}' || true)"
+          IMAGE_ID="$(docker image inspect "${IMAGE_REF}" --format '{{.Id}}')"
+          echo "image_digest=${IMAGE_DIGEST:-${IMAGE_ID}}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify T5 CPU and Alex prompt contract
+        run: |
+          IMAGE_REF="${IMAGE_NAME}:${EXPECTED_IMAGE_TAG}"
+          docker run --rm \
+            -e EXPECTED_IMAGE_TAG="${EXPECTED_IMAGE_TAG}" \
+            -e PYTHONPATH="/opt/ayl-simplepod-wan22-s2v-fastapi-v2:/opt/Wan2.2" \
+            "${IMAGE_REF}" \
+            python - <<'PY'
+          import inspect
+          import json
+          import os
+          from pathlib import Path
+
+          verification_status = "failed"
+
+          def fail(message: str) -> None:
+              raise AssertionError(message)
+
+          expected_tag = os.environ["EXPECTED_IMAGE_TAG"]
+          image_tag = os.environ.get("AYL_IMAGE_TAG", "")
+
+          from app import settings
+
+          service_version = getattr(settings, "SERVICE_VERSION", "")
+          if image_tag != expected_tag and service_version != expected_tag:
+              fail(f"Expected AYL_IMAGE_TAG or SERVICE_VERSION to match {expected_tag!r}; got {image_tag!r} / {service_version!r}")
+
+          generate_py = Path("/opt/Wan2.2/generate.py")
+          if not generate_py.is_file():
+              fail("Missing /opt/Wan2.2/generate.py")
+          generate_source = generate_py.read_text(encoding="utf-8")
+          if "--t5_cpu" not in generate_source:
+              fail("Wan2.2 generate.py parser does not declare --t5_cpu")
+
+          from app import wan22_s2v_generate_wrapper as wrapper
+          from app import wan22_s2v_runner as runner
+
+          payload = {
+              "character_id": "alex",
+              "seed": 42,
+              "steps": 5,
+              "cfg": 1.0,
+              "shift": 4.0,
+              "t5_cpu": True,
+          }
+          resolved = runner.resolve_wan22_parameters(payload)
+          forwarded = resolved["forwarded_parameters"]
+          command = runner.build_command(
+              Path("/tmp/reference.png"),
+              Path("/tmp/audio.wav"),
+              Path("/tmp/alex_en_cast_720_t5cpu_fix2_720x720.mp4"),
+              Path("/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B"),
+              720,
+              720,
+              forwarded,
+          )
+          prompt = str(forwarded["positive_prompt"])
+
+          if not bool(forwarded.get("t5_cpu")):
+              fail("forwarded_parameters.t5_cpu is not true")
+          if "--t5_cpu" not in command:
+              fail("Generated command does not contain --t5_cpu")
+          if "--offload_model" not in command:
+              fail("Generated command does not contain --offload_model")
+          offload_index = command.index("--offload_model")
+          if offload_index + 1 >= len(command) or command[offload_index + 1] != "True":
+              fail("--offload_model value is not True")
+          if "--convert_model_dtype" not in command:
+              fail("Generated command does not contain --convert_model_dtype")
+          if "natural English speech articulation" not in prompt:
+              fail("Alex prompt is missing natural English speech articulation")
+          if "same man" not in prompt:
+              fail("Alex prompt is missing same man")
+          forbidden_prompt_terms = ("Maé", "French", "same woman")
+          forbidden_matches = [term for term in forbidden_prompt_terms if term in prompt]
+          if forbidden_matches:
+              fail(f"Alex prompt contains forbidden terms: {forbidden_matches}")
+
+          if not hasattr(runner, "t5_cpu_command_status"):
+              fail("runner.t5_cpu_command_status is missing")
+          t5_status = runner.t5_cpu_command_status(command, forwarded)
+          if t5_status.get("t5_cpu_requested") is not True:
+              fail("t5_cpu_requested did not resolve true")
+          if t5_status.get("t5_cpu_forwarded") is not True:
+              fail("t5_cpu_forwarded did not resolve true")
+          if "t5_cpu_effective" not in t5_status:
+              fail("t5_cpu_effective telemetry is missing")
+          if t5_status.get("t5_cpu_effective") is not True:
+              fail("t5_cpu_effective did not resolve true")
+
+          wrapper_source = inspect.getsource(wrapper.main)
+          cleanup_terms = (
+              "finally:",
+              "gc.collect()",
+              "torch.cuda.synchronize()",
+              "torch.cuda.empty_cache()",
+              "torch.cuda.ipc_collect()",
+          )
+          cleanup_present = all(term in wrapper_source for term in cleanup_terms)
+          if not cleanup_present:
+              fail("Wrapper cleanup block is missing required CUDA cleanup calls inside finally")
+
+          canonical_prompt_valid = (
+              "natural English speech articulation" in prompt
+              and "same man" in prompt
+              and not forbidden_matches
+          )
+          verification_status = "passed"
+          print(f"image_tag={expected_tag}")
+          print(f"service_version={service_version}")
+          print("generated_command=" + json.dumps(command, ensure_ascii=False))
+          print(f"resolved_alex_prompt={prompt}")
+          print(f"contains_t5_cpu={str('--t5_cpu' in command).lower()}")
+          print(f"canonical_prompt_valid={str(canonical_prompt_valid).lower()}")
+          print(f"cleanup_present={str(cleanup_present).lower()}")
+          print(f"verification_status={verification_status}")
+          PY
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "image_tag=${EXPECTED_IMAGE_TAG}"
+          echo "image_digest=${{ steps.inspect.outputs.image_digest }}"
