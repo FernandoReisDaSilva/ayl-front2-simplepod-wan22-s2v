@@ -403,7 +403,7 @@ def validate_run_job_payload(payload: Any) -> dict:
                 "optional": list(RUN_JOB_OPTIONAL_FIELDS),
             },
         )
-    expected_values = {"fps": 16, "target_duration_seconds": 14.8}
+    expected_values = {"fps": 16}
     mismatches = {}
     for key, expected in expected_values.items():
         value = payload.get(key)
@@ -435,6 +435,21 @@ def validate_run_job_payload(payload: Any) -> dict:
         payload["width"] = width
         payload["height"] = height
         payload["resolution"] = f"{width}x{height}"
+    try:
+        target_duration_seconds = float(payload.get("target_duration_seconds"))
+    except (TypeError, ValueError):
+        mismatches["target_duration_seconds"] = {
+            "expected": "positive number of seconds",
+            "received": payload.get("target_duration_seconds"),
+        }
+    else:
+        if target_duration_seconds <= 0:
+            mismatches["target_duration_seconds"] = {
+                "expected": "positive number of seconds",
+                "received": payload.get("target_duration_seconds"),
+            }
+        else:
+            payload["target_duration_seconds"] = target_duration_seconds
     if mismatches:
         raise HTTPException(
             status_code=422,
