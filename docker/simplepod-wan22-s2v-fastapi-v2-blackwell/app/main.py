@@ -19,6 +19,10 @@ from fastapi.responses import JSONResponse
 from .r2_client import r2_env_alias_presence, r2_env_ready
 from .reporting import file_facts, now_iso, stub_final_report
 from .settings import SERVICE_NAME, SERVICE_VERSION, get_settings, is_secret_key
+from .wan22_s2v_persistent_worker import (
+    Wan22S2VPersistentWorker,
+    Wan22S2VPersistentWorkerConfig,
+)
 from .wan22_s2v_runner import run_wan22_s2v_single_job
 
 
@@ -84,6 +88,8 @@ RUN_JOB_OPTIONAL_FIELDS = (
 ASYNC_JOBS_LOCK = threading.Lock()
 ASYNC_JOBS: dict[str, dict[str, Any]] = {}
 ASYNC_RUNNING_JOB_IDS: set[str] = set()
+PERSISTENT_WORKER_LOCK = threading.Lock()
+PERSISTENT_WORKER: Wan22S2VPersistentWorker | None = None
 RELEVANT_PACKAGES = (
     "torch",
     "torchvision",
@@ -543,6 +549,16 @@ def update_async_job(job_id: str, **updates: Any) -> None:
     with ASYNC_JOBS_LOCK:
         if job_id in ASYNC_JOBS:
             ASYNC_JOBS[job_id].update(updates)
+
+
+def persistent_worker() -> Wan22S2VPersistentWorker:
+    global PERSISTENT_WORKER
+    settings = get_settings()
+    config = Wan22S2VPersistentWorkerConfig.from_settings(settings)
+    with PERSISTENT_WORKER_LOCK:
+        if PERSISTENT_WORKER is None or PERSISTENT_WORKER.config != config:
+            PERSISTENT_WORKER = Wan22S2VPersistentWorker(config)
+        return PERSISTENT_WORKER
 
 
 def run_async_wan22_job(job_id: str, payload: dict[str, Any]) -> None:
@@ -1484,6 +1500,43 @@ def run_mae_wan22_s2v_async(payload: dict[str, Any]) -> dict:
         "max_concurrent_jobs": settings.max_concurrent_jobs,
         "active_jobs_at_submission": active_jobs_at_submission,
     }
+
+
+@app.post("/admin/persistent-worker/load-probe")
+def persistent_worker_load_probe() -> dict:
+    require_admin_verify_enabled()
+    worker = persistent_worker()
+    result = worker.load_once()
+    result["probe_type"] = "load_only"
+    result["inference_executed"] = False
+    result["video_generated"] = False
+    result["subprocess_fallback_available"] = True
+    result["subprocess_fallback_endpoint"] = "/jobs/wan22-s2v/run"
+    return result
+
+
+@app.get("/admin/persistent-worker/status")
+def persistent_worker_status() -> dict:
+    require_admin_verify_enabled()
+    worker = persistent_worker()
+    result = worker.status()
+    result["probe_type"] = "status_only"
+    result["inference_executed"] = False
+    result["video_generated"] = False
+    result["subprocess_fallback_available"] = True
+    return result
+
+
+@app.post("/admin/persistent-worker/unload")
+def persistent_worker_unload() -> dict:
+    require_admin_verify_enabled()
+    worker = persistent_worker()
+    result = worker.unload()
+    result["probe_type"] = "unload_only"
+    result["inference_executed"] = False
+    result["video_generated"] = False
+    result["subprocess_fallback_available"] = True
+    return result
 
 
 @app.get("/admin/jobs/{job_id}")
