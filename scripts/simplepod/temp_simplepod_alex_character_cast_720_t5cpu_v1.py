@@ -9,11 +9,11 @@ import simplepod_wan22_s2v_runtime_base as base
 from simplepod_phase_timing import PhaseTimer, now_iso
 
 
-TEST_ID = "TEMP_SIMPLEPOD_ALEX_CHARACTER_CAST_720_T5CPU_FIX_V1"
+TEST_ID = "TEMP_SIMPLEPOD_ALEX_CHARACTER_CAST_720_T5CPU_V1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REPORT_PATH = REPO_ROOT / "logs" / "alex_character_cast_720_t5cpu_fix_v1_summary.json"
+REPORT_PATH = REPO_ROOT / "logs" / "alex_character_cast_720_t5cpu_v1_summary.json"
 
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.26-blackwell-t5cpu-fix3"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.23-blackwell-t5cpu"
 MAX_CONCURRENT_JOBS = "1"
 WIDTH = 720
 HEIGHT = 720
@@ -21,11 +21,11 @@ HEIGHT = 720
 JOB_SPEC = {
     "character_id": "alex",
     "taught_language": "EN",
-    "output_stem": "alex_en_cast_720_t5cpu_fix_v1",
+    "output_stem": "alex_en_cast_720_t5cpu_v1",
     "local_image_path": "data/character_cast/parallel_round1/alex/reference/alex_lipsync_optimized_reference.png",
     "local_audio_path": "data/character_cast/parallel_round1/alex/audio/alex_en_cast_voice_v1_wan15s.wav",
-    "input_image_key": "tests/simplepod_character_cast_alex_720_t5cpu_fix_v1/inputs/alex/reference/alex_lipsync_optimized_reference.png",
-    "input_audio_key": "tests/simplepod_character_cast_alex_720_t5cpu_fix_v1/inputs/alex/audio/alex_en_cast_voice_v1_wan15s.wav",
+    "input_image_key": "tests/simplepod_character_cast_alex_720_t5cpu_v1/inputs/alex/reference/alex_lipsync_optimized_reference.png",
+    "input_audio_key": "tests/simplepod_character_cast_alex_720_t5cpu_v1/inputs/alex/audio/alex_en_cast_voice_v1_wan15s.wav",
 }
 
 
@@ -70,18 +70,18 @@ def isolated_runtime_payload(instance_market: str) -> dict:
             item["value"] = MAX_CONCURRENT_JOBS
             found_max_concurrent = True
         if item.get("name") == "AYL_IMAGE_TAG":
-            item["value"] = "0.2.26-blackwell-t5cpu-fix3"
+            item["value"] = "0.2.23-blackwell-t5cpu"
             found_image_tag = True
         if item.get("name") == "AYL_RUNTIME_VERSION":
-            item["value"] = "v2-blackwell-t5cpu-fix-v1"
+            item["value"] = "v2-blackwell-t5cpu-vram-cleanup-experiment"
             found_runtime_version = True
     if not found_max_concurrent:
         payload.setdefault("envVariables", []).append({"name": "MAX_CONCURRENT_JOBS", "value": MAX_CONCURRENT_JOBS})
     if not found_image_tag:
-        payload.setdefault("envVariables", []).append({"name": "AYL_IMAGE_TAG", "value": "0.2.26-blackwell-t5cpu-fix3"})
+        payload.setdefault("envVariables", []).append({"name": "AYL_IMAGE_TAG", "value": "0.2.23-blackwell-t5cpu"})
     if not found_runtime_version:
         payload.setdefault("envVariables", []).append(
-            {"name": "AYL_RUNTIME_VERSION", "value": "v2-blackwell-t5cpu-fix-v1"}
+            {"name": "AYL_RUNTIME_VERSION", "value": "v2-blackwell-t5cpu-vram-cleanup-experiment"}
         )
     return payload
 

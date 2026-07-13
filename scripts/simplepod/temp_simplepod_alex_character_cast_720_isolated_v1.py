@@ -9,11 +9,11 @@ import simplepod_wan22_s2v_runtime_base as base
 from simplepod_phase_timing import PhaseTimer, now_iso
 
 
-TEST_ID = "TEMP_SIMPLEPOD_ALEX_CHARACTER_CAST_720_T5CPU_FIX_V1"
+TEST_ID = "TEMP_SIMPLEPOD_ALEX_CHARACTER_CAST_720_ISOLATED_V1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REPORT_PATH = REPO_ROOT / "logs" / "alex_character_cast_720_t5cpu_fix_v1_summary.json"
+REPORT_PATH = REPO_ROOT / "logs" / "alex_character_cast_720_isolated_v1_summary.json"
 
-IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.26-blackwell-t5cpu-fix3"
+IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.22-blackwell"
 MAX_CONCURRENT_JOBS = "1"
 WIDTH = 720
 HEIGHT = 720
@@ -21,11 +21,11 @@ HEIGHT = 720
 JOB_SPEC = {
     "character_id": "alex",
     "taught_language": "EN",
-    "output_stem": "alex_en_cast_720_t5cpu_fix_v1",
+    "output_stem": "alex_en_cast_720_isolated_v1",
     "local_image_path": "data/character_cast/parallel_round1/alex/reference/alex_lipsync_optimized_reference.png",
     "local_audio_path": "data/character_cast/parallel_round1/alex/audio/alex_en_cast_voice_v1_wan15s.wav",
-    "input_image_key": "tests/simplepod_character_cast_alex_720_t5cpu_fix_v1/inputs/alex/reference/alex_lipsync_optimized_reference.png",
-    "input_audio_key": "tests/simplepod_character_cast_alex_720_t5cpu_fix_v1/inputs/alex/audio/alex_en_cast_voice_v1_wan15s.wav",
+    "input_image_key": "tests/simplepod_character_cast_alex_720_isolated_v1/inputs/alex/reference/alex_lipsync_optimized_reference.png",
+    "input_audio_key": "tests/simplepod_character_cast_alex_720_isolated_v1/inputs/alex/audio/alex_en_cast_voice_v1_wan15s.wav",
 }
 
 
@@ -62,27 +62,13 @@ def job_args(args: argparse.Namespace) -> argparse.Namespace:
 
 def isolated_runtime_payload(instance_market: str) -> dict:
     payload = base.runtime_payload(instance_market)
-    found_max_concurrent = False
-    found_image_tag = False
-    found_runtime_version = False
+    found = False
     for item in payload.get("envVariables", []):
         if item.get("name") == "MAX_CONCURRENT_JOBS":
             item["value"] = MAX_CONCURRENT_JOBS
-            found_max_concurrent = True
-        if item.get("name") == "AYL_IMAGE_TAG":
-            item["value"] = "0.2.26-blackwell-t5cpu-fix3"
-            found_image_tag = True
-        if item.get("name") == "AYL_RUNTIME_VERSION":
-            item["value"] = "v2-blackwell-t5cpu-fix-v1"
-            found_runtime_version = True
-    if not found_max_concurrent:
+            found = True
+    if not found:
         payload.setdefault("envVariables", []).append({"name": "MAX_CONCURRENT_JOBS", "value": MAX_CONCURRENT_JOBS})
-    if not found_image_tag:
-        payload.setdefault("envVariables", []).append({"name": "AYL_IMAGE_TAG", "value": "0.2.26-blackwell-t5cpu-fix3"})
-    if not found_runtime_version:
-        payload.setdefault("envVariables", []).append(
-            {"name": "AYL_RUNTIME_VERSION", "value": "v2-blackwell-t5cpu-fix-v1"}
-        )
     return payload
 
 
@@ -210,7 +196,7 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
         "shift": 4.0,
         "offload_model": True,
         "convert_model_dtype": True,
-        "t5_cpu": True,
+        "t5_cpu": False,
         "image_ref": IMAGE,
         "template_id": base.TEMPLATE_ID,
         "max_concurrent_jobs": int(MAX_CONCURRENT_JOBS),
@@ -250,7 +236,7 @@ def build_report(args: argparse.Namespace, status: str, data: dict, error: str =
             "inference_job_submitted": bool(data.get("async_job_start_result", {}).get("attempted")),
             "delete_attempted": bool(delete_result.get("attempted")),
             "max_concurrent_jobs_one": True,
-            "t5_cpu_enabled": True,
+            "t5_cpu_enabled": False,
             "secrets_printed": False,
         },
         "runtime": data,
@@ -484,7 +470,7 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Experimental Alex EN Character Cast Wan2.2 S2V 720x720 T5 CPU test on one SimplePod Blackwell 96GB instance."
+        description="Experimental isolated Alex EN Character Cast Wan2.2 S2V 720x720 test on one SimplePod Blackwell 96GB instance."
     )
     parser.add_argument("--execute", action="store_true", help="Create SimplePod, upload inputs, submit Alex job, download outputs, then delete.")
     parser.add_argument("--confirm-start", action="store_true", help="Required with --execute to create the SimplePod instance.")

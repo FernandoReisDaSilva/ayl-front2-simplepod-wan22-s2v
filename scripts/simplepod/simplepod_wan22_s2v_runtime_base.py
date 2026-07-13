@@ -14,11 +14,9 @@ import temp_simplepod_runtime_smoke_v2 as smoke
 from simplepod_phase_timing import PhaseTimer, now_iso
 
 
-TEST_ID = "TEMP_SIMPLEPOD_RUN_MAE_WAN22_S2V_14_8S_1080_BLACKWELL_NATURAL_V5"
-GENERIC_TEST_ID = "TEMP_SIMPLEPOD_RUN_WAN22_S2V_BLACKWELL_NATURAL_V5"
+TEST_ID = "SIMPLEPOD_WAN22_S2V_RUNTIME"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_REPORT_PATH = REPO_ROOT / "logs" / "simplepod_mae_wan22_s2v_14_8s_1080_blackwell_natural_v5_inference_v1.json"
-REPORT_PATH = DEFAULT_REPORT_PATH
+REPORT_PATH = REPO_ROOT / "logs" / "simplepod_wan22_s2v_runtime_base.json"
 
 TEMPLATE_ID = 25138
 IMAGE = "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.2.22-blackwell"
@@ -34,14 +32,14 @@ INFERENCE_ENDPOINT = "/jobs/wan22-s2v/run"
 ASYNC_INFERENCE_ENDPOINT = "/admin/run-mae-wan22-s2v-async"
 GPU_POLICY = "blackwell_full_96gb_inference_policy"
 
-JOB_ID_PREFIX = "mae_fr_wan22_s2v_14_8s"
-JOB_ID_SUFFIX = "blackwell_natural_v5_native_partial"
-DEFAULT_CHARACTER_ID = "mae"
-DEFAULT_TAUGHT_LANGUAGE = "FR"
-REFERENCE_IMAGE_KEY = "tests/simplepod_wan22_s2v/inputs/mae_fr_wan22_s2v_14_8s_1080_v1/reference/Mae_para_Wan_V3.png"
-AUDIO_KEY = "tests/simplepod_wan22_s2v/inputs/mae_fr_wan22_s2v_14_8s_1080_v1/audio/mae_fr_14_8s_cut_for_wan.wav"
-CONFIRM_INFERENCE_1080 = "RUN_WAN22_S2V_MAE_14_8S_1080_BLACKWELL_NATURAL_V5_NATIVE_PARTIAL"
-CONFIRM_INFERENCE_720 = "RUN_WAN22_S2V_MAE_14_8S_720_BLACKWELL_NATURAL_V5_NATIVE_PARTIAL"
+JOB_ID_PREFIX = "simplepod_wan22_s2v"
+JOB_ID_SUFFIX = "runtime_base_native_partial"
+DEFAULT_CHARACTER_ID = ""
+DEFAULT_TAUGHT_LANGUAGE = ""
+REFERENCE_IMAGE_KEY = ""
+AUDIO_KEY = ""
+CONFIRM_INFERENCE_1080 = "RUN_WAN22_S2V_BLACKWELL_NATIVE_PARTIAL"
+CONFIRM_INFERENCE_720 = "RUN_WAN22_S2V_BLACKWELL_NATIVE_PARTIAL"
 CONFIRM_INFERENCE_GENERIC = "RUN_WAN22_S2V_BLACKWELL_NATIVE_PARTIAL"
 NATIVE_PARTIAL_REASON = "Native Wan2.2 runner does not have confirmed support for ComfyUI/WanVideoWrapper conditioning parameters."
 NATURAL_V5_REFERENCE_UNSUPPORTED_PARAMETERS = {
@@ -60,12 +58,6 @@ LOCAL_R2_ENV_KEYS = (
     "R2_BUCKET_NAME",
     "R2_REGION",
 )
-
-
-def script_id_for_args(args: argparse.Namespace) -> str:
-    if args.character_id == DEFAULT_CHARACTER_ID and args.taught_language == DEFAULT_TAUGHT_LANGUAGE:
-        return TEST_ID
-    return os.getenv("AYL_SCRIPT_ID", GENERIC_TEST_ID)
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -214,13 +206,6 @@ def test_id_for_args(args: argparse.Namespace) -> str:
     return args.test_id or output_stem(args)
 
 
-def report_path_for_args(args: argparse.Namespace) -> Path:
-    if args.character_id == DEFAULT_CHARACTER_ID and args.taught_language == DEFAULT_TAUGHT_LANGUAGE:
-        return DEFAULT_REPORT_PATH
-    safe_test_id = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in test_id_for_args(args))
-    return REPO_ROOT / "logs" / f"{safe_test_id}_simplepod_wan22_s2v_inference_v1.json"
-
-
 def output_video_key(args: argparse.Namespace) -> str:
     return f"tests/simplepod_wan22_s2v/outputs/{output_stem(args)}.mp4"
 
@@ -303,7 +288,7 @@ def runtime_payload(instance_market: str) -> dict:
             {"name": "WAN22_S2V_MODEL_DIR", "value": MODEL_DIR},
             {"name": "HF_HOME", "value": HF_HOME},
             {"name": "AYL_ENABLE_ADMIN_VERIFY", "value": "1"},
-            {"name": "AYL_RUNTIME_VERSION", "value": "v2-blackwell-mae-natural-v5-inference"},
+            {"name": "AYL_RUNTIME_VERSION", "value": "v2-blackwell-runtime-base"},
             {"name": "AYL_SAFETENSORS_CUDA_TO_CPU_PATCH", "value": "1"},
             {"name": "MAX_CONCURRENT_JOBS", "value": "1"},
             {"name": "PYTHONUNBUFFERED", "value": "1"},
@@ -334,7 +319,7 @@ def simple_post(url: str, payload: dict, timeout_seconds: int) -> dict:
         headers={
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "ayl-front2-simplepod-mae-wan22-s2v-blackwell-v1",
+            "User-Agent": "ayl-front2-simplepod-wan22-s2v-runtime-base",
         },
     )
     try:
@@ -374,7 +359,7 @@ def simple_get(url: str, timeout_seconds: int) -> dict:
         method="GET",
         headers={
             "Accept": "application/json",
-            "User-Agent": "ayl-front2-simplepod-mae-wan22-s2v-blackwell-v1",
+            "User-Agent": "ayl-front2-simplepod-wan22-s2v-runtime-base",
         },
     )
     try:
@@ -522,7 +507,7 @@ def r2_preflight_from_inference(value) -> dict:
     }
 
 
-def poll_async_job(proxy_url: str, job_id: str, args: argparse.Namespace) -> dict:
+def poll_async_job(proxy_url: str, job_id: str, args: argparse.Namespace, log_prefix: str | None = None) -> dict:
     started = time.monotonic()
     attempts = []
     status_url = proxy_url + f"/admin/jobs/{job_id}"
@@ -548,7 +533,7 @@ def poll_async_job(proxy_url: str, job_id: str, args: argparse.Namespace) -> dic
                 "error_type": result.get("error_type", ""),
             }
         )
-        print(f"[{TEST_ID}] job_status={job_status} elapsed={int(elapsed)}s")
+        print(f"[{log_prefix or TEST_ID}] job_status={job_status} elapsed={int(elapsed)}s")
         if isinstance(body, dict) and job_status in {"succeeded", "failed"}:
             return {
                 "status": "succeeded",
@@ -736,457 +721,3 @@ def runtime_gpu_is_full_blackwell(gpu_json) -> dict:
         "reason": "" if validation.get("status") == "passed" and not is_mig else "runtime GPU is not full Blackwell 96GB or appears to be MIG",
     }
 
-
-def build_report(args: argparse.Namespace, status: str, data: dict, error: str = "") -> dict:
-    execute_allowed = args.execute and args.confirm_start and args.confirm_inference and args.confirm_delete
-    selected_summary = selected_summary_from_data(data)
-    runtime_seconds = data.get("runtime_seconds")
-    requested_width = int(args.width)
-    requested_height = int(args.height)
-    requested_resolution = f"{requested_width}x{requested_height}"
-    payload = inference_payload(args)
-    inference_summary = data.get("inference_result", {}).get("summary", {})
-    async_start_json = data.get("async_job_start_result", {}).get("json")
-    if not isinstance(async_start_json, dict):
-        async_start_json = {}
-    return {
-        "script_id": TEST_ID,
-        "test_id": test_id_for_args(args),
-        "created_at": now_iso(),
-        "status": status,
-        "error": error,
-        "dry_run": not execute_allowed,
-        "job_id": inference_summary.get("job_id") or payload["job_id"],
-        "job_status": inference_summary.get("job_status"),
-        "character_id": args.character_id,
-        "taught_language": args.taught_language,
-        "local_image_path": str(local_path_value(args.local_image_path)) if args.local_image_path else "",
-        "local_audio_path": str(local_path_value(args.local_audio_path)) if args.local_audio_path else "",
-        "input_image_key": payload["reference_image_key"],
-        "input_audio_key": payload["audio_key"],
-        "upload_inputs": bool(args.upload_inputs),
-        "uploaded_image_result": data.get("uploaded_image_result", {}),
-        "uploaded_audio_result": data.get("uploaded_audio_result", {}),
-        "output_stem": output_stem(args),
-        "width": inference_summary.get("width", requested_width),
-        "height": inference_summary.get("height", requested_height),
-        "resolution": inference_summary.get("resolution", requested_resolution),
-        "requested_width": requested_width,
-        "requested_height": requested_height,
-        "requested_resolution": requested_resolution,
-        "output_width": inference_summary.get("output_width"),
-        "output_height": inference_summary.get("output_height"),
-        "output_resolution": inference_summary.get("output_resolution"),
-        "template_id": TEMPLATE_ID,
-        "image_ref": IMAGE,
-        "stable_template_unchanged": STABLE_TEMPLATE_ID,
-        "stable_image_unchanged": STABLE_IMAGE,
-        "gpu_policy": GPU_POLICY,
-        "selected_market_id": data.get("market_selection", {}).get("selected_market_id") or selected_summary.get("market_id", ""),
-        "gpuModel": selected_summary.get("gpuModel", ""),
-        "gpuMemorySize": selected_summary.get("gpuMemorySize"),
-        "pricePerGpu": selected_summary.get("pricePerGpu"),
-        "instance_id": data.get("instance_id"),
-        "public_url": data.get("public_api_base_url", ""),
-        "health_result": data.get("health_result", {}),
-        "gpu_result": data.get("gpu_check", {}),
-        "runtime_verify_result": data.get("runtime_verify_result", {}),
-        "r2_preflight_result": data.get("r2_preflight_result", {}),
-        "inference_result": data.get("inference_result", {}),
-        "async_inference_endpoint": ASYNC_INFERENCE_ENDPOINT,
-        "async_job_id": data.get("async_job_id", ""),
-        "async_job_start_result": data.get("async_job_start_result", {}),
-        "async_job_poll_result": data.get("async_job_poll_result", {}),
-        "job_timeout_seconds": args.job_timeout_seconds,
-        "job_poll_interval_seconds": args.job_poll_interval_seconds,
-        "max_concurrent_jobs": 1,
-        "active_jobs_at_submission": async_start_json.get("active_jobs_at_submission"),
-        "output_video_key": payload["output_video_key"],
-        "output_report_key": payload["output_report_key"],
-        "payload_dryrun": payload,
-        "native_partial_reason": NATIVE_PARTIAL_REASON,
-        "natural_v5_reference_unsupported_parameters": NATURAL_V5_REFERENCE_UNSUPPORTED_PARAMETERS,
-        "r2_env_local_check": data.get("r2_env_local_check", local_r2_env_presence()),
-        "instance_payload_dryrun": redact_instance_payload(runtime_payload(args.instance_market or "<selected_full_blackwell_96gb_market>")),
-        "startScript_sent": False,
-        "uses_image_cmd": True,
-        "docker_entrypoint_arguments_sent": False,
-        "runtime_seconds": runtime_seconds,
-        "estimated_cost": estimate_cost(selected_summary, runtime_seconds),
-        "delete_result": data.get("delete_result", {}),
-        "phase_timings": data.get("phase_timings", []),
-        "safety_guards": {
-            "downloads_model_weights": False,
-            "runs_inference": bool(data.get("inference_result", {}).get("attempted")),
-            "generates_video": bool(data.get("inference_result", {}).get("summary", {}).get("video_generated") is True),
-            "placeholder_generated": False,
-            "uses_scheduler": False,
-            "parallel_jobs": False,
-            "uses_mig": False,
-            "simplepod_start_called": bool(data.get("start_result", {}).get("attempted")),
-            "delete_attempted": bool(data.get("delete_result", {}).get("attempted")),
-            "calls_simplepod": bool(execute_allowed),
-            "secrets_printed": False,
-        },
-        "runtime": data,
-    }
-
-
-def blocked_status(args: argparse.Namespace) -> str:
-    if args.width <= 0 or args.height <= 0:
-        return "blocked_invalid_resolution"
-    if args.width > 1080 or args.height > 1080:
-        return "blocked_resolution_above_1080"
-    if args.upload_inputs and (not args.local_image_path or not args.local_audio_path):
-        return "blocked_upload_inputs_missing_local_paths"
-    if args.execute and args.upload_inputs:
-        if not local_path_value(args.local_image_path).is_file() or not local_path_value(args.local_audio_path).is_file():
-            return "blocked_upload_inputs_local_files_missing"
-    if args.execute and not args.confirm_start:
-        return "blocked_missing_confirm_start"
-    if args.execute and not args.confirm_inference:
-        return "blocked_missing_confirm_inference"
-    if args.execute and not args.confirm_delete:
-        return "blocked_missing_confirm_delete"
-    return ""
-
-
-def run(args: argparse.Namespace) -> int:
-    global REPORT_PATH, TEST_ID
-    TEST_ID = script_id_for_args(args)
-    REPORT_PATH = report_path_for_args(args)
-    data = {
-        "delete_result": {
-            "attempted": False,
-            "status": "not_started",
-            "http_status_code": None,
-            "error_type": "",
-            "error_truncated": "",
-        }
-    }
-    timer = PhaseTimer()
-    data["phase_timings"] = timer.phases
-    instance_id = None
-    proxy_url = ""
-    async_job_id = ""
-    api_key = ""
-    base_url = smoke.DEFAULT_BASE_URL
-    started_monotonic = time.monotonic()
-    try:
-        execute_allowed = args.execute and args.confirm_start and args.confirm_inference and args.confirm_delete
-        print(f"[{TEST_ID}] START dry_run={str(not execute_allowed).lower()} template_id={TEMPLATE_ID}")
-        print(f"[{TEST_ID}] image_required={IMAGE}")
-        print(f"[{TEST_ID}] gpu_policy={GPU_POLICY} target={args.width}x{args.height} allow_oom_fallback=false")
-
-        status = blocked_status(args)
-        if status:
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-
-        with timer.phase("load_auth_env"):
-            load_local_env()
-            api_key = os.getenv(smoke.API_KEY_ENV, "")
-            base_url = os.getenv(smoke.BASE_URL_ENV, smoke.DEFAULT_BASE_URL)
-            data["r2_env_local_check"] = local_r2_env_presence()
-
-        with timer.phase("prepare_input_uploads"):
-            upload_results = prepare_input_uploads(args, dry_run=not execute_allowed)
-            data.update(upload_results)
-        if execute_allowed and args.upload_inputs:
-            upload_ok = (
-                data.get("uploaded_image_result", {}).get("status") == "succeeded"
-                and data.get("uploaded_audio_result", {}).get("status") == "succeeded"
-            )
-            if not upload_ok:
-                status = "failed_upload_inputs"
-                data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-                write_json(REPORT_PATH, build_report(args, status, data))
-                print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-                return 1
-
-        if api_key:
-            with timer.phase("market_selection"):
-                market = choose_market(args, base_url, api_key, data)
-        else:
-            market = args.instance_market
-            data["market_selection"] = {
-                "status": "skipped_missing_api_key",
-                "selected": select_full_blackwell_market([]),
-            }
-
-        if not execute_allowed:
-            with timer.phase("dry_run_report"):
-                pass
-            status = "dry_run_ready"
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 0
-
-        if not api_key:
-            status = "missing_api_key"
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-        missing_r2 = missing_local_r2_env()
-        if missing_r2:
-            status = "missing_local_r2_env"
-            data["missing_local_r2_env"] = missing_r2
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-        if not market:
-            status = "blocked_no_full_blackwell_96gb_market_selected"
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-
-        with timer.phase("start_instance"):
-            start_payload = runtime_payload(market)
-            start_result = smoke.http_request(base_url, smoke.START_INSTANCE_PATH, api_key, method="POST", payload=start_payload)
-        data["start_result"] = {
-            key: start_result.get(key)
-            for key in (
-                "attempted",
-                "status",
-                "method",
-                "path",
-                "http_status_code",
-                "endpoint_host",
-                "content_type",
-                "body_bytes",
-                "error_type",
-                "error_truncated",
-                "response_body_truncated",
-            )
-        }
-        data["start_result"]["request_payload_redacted"] = redact_instance_payload(start_payload)
-        data["start_result"]["json"] = start_result.get("json")
-        instance_id = smoke.extract_instance_id(start_result.get("json"))
-        data["instance_id"] = instance_id
-        if start_result.get("status") != "succeeded" or instance_id is None:
-            status = "start_failed"
-            data["_status_for_finally"] = status
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-
-        with timer.phase("wait_public_url"):
-            proxy_url = wait_for_public_url(base_url, api_key, instance_id, args, data)
-        if not proxy_url:
-            status = "blocked_no_proxy_url_for_port_8000"
-            data["_status_for_finally"] = status
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-
-        with timer.phase("wait_health"):
-            readiness, readiness_attempts, _ = smoke.wait_for_instance_api(proxy_url, args.ready_timeout_seconds)
-        data["api_readiness"] = {"status": readiness, "attempts": readiness_attempts}
-        if readiness != "ready":
-            status = "api_not_ready"
-            data["_status_for_finally"] = status
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-
-        with timer.phase("health_check"):
-            health_result = smoke.simple_get(proxy_url + "/health")
-        data["health_result"] = {
-            "status": health_result.get("status"),
-            "http_status_code": health_result.get("http_status_code"),
-            "summary": smoke.summarize_api_response(health_result.get("json")),
-        }
-        if health_result.get("http_status_code") != 200:
-            status = "health_check_failed"
-            data["_status_for_finally"] = status
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-
-        with timer.phase("gpu_check"):
-            gpu_result = smoke.simple_get(proxy_url + "/gpu")
-        data["gpu_check"] = {
-            "status": gpu_result.get("status"),
-            "http_status_code": gpu_result.get("http_status_code"),
-            "summary": blackwell_smoke.summarize_gpu(gpu_result.get("json")),
-            "full_blackwell_runtime_check": runtime_gpu_is_full_blackwell(gpu_result.get("json")),
-        }
-        if data["gpu_check"]["full_blackwell_runtime_check"].get("status") != "passed":
-            status = "blocked_runtime_not_full_blackwell_96gb_or_mig"
-            data["_status_for_finally"] = status
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-
-        with timer.phase("wan22_runtime_verify"):
-            verify_result = smoke.simple_get(proxy_url + VERIFY_ENDPOINT)
-        data["runtime_verify_result"] = {
-            "attempted": True,
-            "status": verify_result.get("status"),
-            "http_status_code": verify_result.get("http_status_code"),
-            "error_type": verify_result.get("error_type", ""),
-            "error_truncated": verify_result.get("error_truncated", ""),
-            "summary": summarize_runtime_verify(verify_result.get("json")),
-        }
-        if not runtime_verify_passed(verify_result):
-            status = "failed_wan22_runtime_verify_before_inference"
-            data["_status_for_finally"] = status
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-
-        with timer.phase("start_async_inference_job"):
-            async_start_result = simple_post(
-                proxy_url + ASYNC_INFERENCE_ENDPOINT,
-                inference_payload(args),
-                60,
-            )
-        async_start_body = async_start_result.get("json")
-        data["async_job_start_result"] = {
-            "attempted": True,
-            "status": async_start_result.get("status"),
-            "http_status_code": async_start_result.get("http_status_code"),
-            "error_type": async_start_result.get("error_type", ""),
-            "error_truncated": async_start_result.get("error_truncated", ""),
-            "json": async_start_body,
-        }
-        if async_start_result.get("http_status_code") not in {200, 202} or not isinstance(async_start_body, dict):
-            status = "failed_start_async_inference_job"
-            data["_status_for_finally"] = status
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-        async_job_id = str(async_start_body.get("job_id") or "")
-        data["async_job_id"] = async_job_id
-        if async_start_body.get("status") != "accepted" or not async_job_id:
-            status = "async_inference_not_accepted"
-            data["_status_for_finally"] = status
-            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-            write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-            return 1
-
-        with timer.phase("poll_async_inference_job"):
-            async_poll_result = poll_async_job(proxy_url, async_job_id, args)
-        data["async_job_poll_result"] = async_poll_result
-        body = async_poll_result.get("json")
-        job_summary = body.get("summary", {}) if isinstance(body, dict) else {}
-        data["r2_preflight_result"] = r2_preflight_from_inference(job_summary)
-        data["inference_result"] = {
-            "attempted": True,
-            "mode": "async_polling",
-            "status": body.get("status") if isinstance(body, dict) else async_poll_result.get("status"),
-            "http_status_code": async_poll_result.get("http_status_code"),
-            "error_type": (body.get("error_type") if isinstance(body, dict) else async_poll_result.get("error_type", "")) or "",
-            "error_truncated": (body.get("error_truncated") if isinstance(body, dict) else async_poll_result.get("error_truncated", "")) or "",
-            "summary": summarize_inference(job_summary),
-            "job_status": body,
-        }
-
-        status = "succeeded" if isinstance(job_summary, dict) and job_summary.get("video_generated") is True else "failed_inference_endpoint"
-        data["_status_for_finally"] = status
-        data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-        write_json(REPORT_PATH, build_report(args, status, data))
-        print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}")
-        return 0 if status == "succeeded" else 1
-    except KeyboardInterrupt:
-        status = "interrupted_delete_attempted" if instance_id is not None else "interrupted"
-        if proxy_url and async_job_id:
-            last_job_status = simple_get(proxy_url + f"/admin/jobs/{async_job_id}", timeout_seconds=20)
-            data["last_async_job_status_on_interrupt"] = last_job_status
-            if "inference_result" not in data:
-                body = last_job_status.get("json")
-                summary = body.get("summary", {}) if isinstance(body, dict) else {}
-                data["inference_result"] = {
-                    "attempted": True,
-                    "mode": "async_polling",
-                    "status": body.get("status") if isinstance(body, dict) else "interrupted",
-                    "http_status_code": last_job_status.get("http_status_code"),
-                    "error_type": "KeyboardInterrupt",
-                    "error_truncated": "Interrupted locally after async job was started.",
-                    "summary": summarize_inference(summary),
-                    "job_status": body,
-                }
-                data["r2_preflight_result"] = r2_preflight_from_inference(summary)
-        data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-        data["_status_for_finally"] = status
-        write_json(REPORT_PATH, build_report(args, status, data, "KeyboardInterrupt"))
-        print(f"[{TEST_ID}] DONE status={status} report={REPORT_PATH}", file=sys.stderr)
-        return 130
-    except Exception as exc:
-        data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-        write_json(REPORT_PATH, build_report(args, "failed", data, str(exc)))
-        print(f"[{TEST_ID}] ERROR {str(exc)[:300]}", file=sys.stderr)
-        print(f"[{TEST_ID}] DONE status=failed report={REPORT_PATH}", file=sys.stderr)
-        return 1
-    finally:
-        if instance_id is not None:
-            delete_path = smoke.DELETE_INSTANCE_PATH.format(id=instance_id)
-            try:
-                with timer.phase("delete_instance"):
-                    delete_result = smoke.http_request(base_url, delete_path, api_key, method="DELETE")
-            except Exception as delete_exc:
-                delete_result = {
-                    "attempted": True,
-                    "status": "failed",
-                    "method": "DELETE",
-                    "path": delete_path,
-                    "http_status_code": None,
-                    "endpoint_host": base_url,
-                    "error_type": type(delete_exc).__name__,
-                    "error_truncated": str(delete_exc)[:1000],
-                }
-            data["delete_result"] = {
-                key: delete_result.get(key)
-                for key in ("attempted", "status", "method", "path", "http_status_code", "endpoint_host", "error_type", "error_truncated")
-            }
-            final_status = data.get("_status_for_finally")
-            if delete_result.get("http_status_code") not in {200, 202, 204}:
-                final_status = "delete_failed_manual_required"
-                print(f"[{TEST_ID}] DELETE FAILED - manual cleanup required instance_id={instance_id}", file=sys.stderr)
-            if final_status:
-                data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
-                write_json(REPORT_PATH, build_report(args, final_status, data))
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dry-run or execute Maé Wan2.2 S2V Blackwell natural_v5 inference gate.")
-    parser.add_argument("--execute", action="store_true", help="Create a real SimplePod instance and call the inference endpoint.")
-    parser.add_argument("--confirm-start", action="store_true", help="Required with --execute to start the instance.")
-    parser.add_argument("--confirm-inference", action="store_true", help="Required with --execute to call the inference endpoint.")
-    parser.add_argument("--confirm-delete", action="store_true", help="Required with --execute to delete the instance at the end.")
-    parser.add_argument("--instance-market", default="", help="Optional explicit /instances/market/{id}; runtime still rejects MIG.")
-    parser.add_argument("--character-id", default=DEFAULT_CHARACTER_ID)
-    parser.add_argument("--taught-language", default=DEFAULT_TAUGHT_LANGUAGE)
-    parser.add_argument("--local-image-path", default="")
-    parser.add_argument("--local-audio-path", default="")
-    parser.add_argument("--input-image-key", default="")
-    parser.add_argument("--input-audio-key", default="")
-    parser.add_argument("--output-stem", default="")
-    parser.add_argument("--test-id", default="")
-    parser.add_argument("--upload-inputs", action="store_true", help="Upload local image/audio to R2 before starting SimplePod. Dry-run only plans.")
-    parser.add_argument("--width", type=int, default=720, help="Requested generation width. Default: 720.")
-    parser.add_argument("--height", type=int, default=720, help="Requested generation height. Default: 720.")
-    parser.add_argument("--detail-attempts", type=int, default=36)
-    parser.add_argument("--poll-interval-seconds", type=int, default=5)
-    parser.add_argument("--ready-timeout-seconds", type=int, default=300)
-    parser.add_argument("--inference-timeout-seconds", type=int, default=7200)
-    parser.add_argument("--job-timeout-seconds", type=int, default=3600)
-    parser.add_argument("--job-poll-interval-seconds", type=int, default=30)
-    return parser.parse_args()
-
-
-if __name__ == "__main__":
-    raise SystemExit(run(parse_args()))
