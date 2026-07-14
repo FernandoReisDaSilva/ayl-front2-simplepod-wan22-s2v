@@ -1,4 +1,5 @@
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -98,7 +99,15 @@ def test_unload_state_guards() -> None:
     restored = {"called": False}
     worker.worker_state = "ready"
     worker._pipeline = object()
-    worker._restore_attention_patch = lambda: restored.__setitem__("called", True)
+    import app.wan22_s2v_persistent_worker as worker_module
+
+    def restore_attention():
+        restored["called"] = True
+        worker_module.RUNTIME_PATCH_REPORT["attention_sdpa_patch"] = {
+            "attention_patch_status": "restored",
+        }
+
+    worker._restore_attention_patch = restore_attention
     worker.last_load_seconds = 12.345
     result = worker.unload()
     assert_true(result["status"] == "unloaded", "expected ready unload to succeed")
@@ -106,19 +115,123 @@ def test_unload_state_guards() -> None:
     assert_true(restored["called"] is True, "expected SDPA restore callback on unload")
     assert_true(worker.worker_state == "unloaded", "expected worker state unloaded")
     assert_true(worker.last_load_seconds is None, "expected last_load_seconds cleared on unload")
+    assert_true(
+        result["attention_sdpa_patch"]["attention_patch_status"] == "restored",
+        "expected unload result to expose restored attention patch status",
+    )
 
 
-def test_run_job_probe_only() -> None:
+def test_run_job_two_jobs_simulated() -> None:
+    import app.wan22_s2v_persistent_worker as worker_module
     from app.wan22_s2v_persistent_worker import (
         Wan22S2VPersistentWorker,
         Wan22S2VPersistentWorkerConfig,
     )
 
-    worker = Wan22S2VPersistentWorker(Wan22S2VPersistentWorkerConfig(model_dir=Path("/tmp/no-model")))
-    result = worker.run_job({"job_id": "probe_job"})
-    assert_true(result["status"] == "not_implemented_probe_only", "expected probe-only run_job")
-    assert_true(result["inference_executed"] is False, "expected run_job to avoid inference")
-    assert_true(result["video_generated"] is False, "expected run_job to avoid video generation")
+    class FakeVideo:
+        def __getitem__(self, item):
+            return self
+
+    class FakePipeline:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, **kwargs):
+            self.calls.append(kwargs)
+            return FakeVideo()
+
+    uploads = []
+    original_download_file = worker_module.download_file
+    original_upload_file = worker_module.upload_file
+    original_save_video = worker_module._save_video_and_merge_audio
+    original_work_root = worker_module.WORK_ROOT
+
+    def fake_download_file(key, destination):
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        Path(destination).write_bytes(b"input")
+
+    def fake_upload_file(source, key):
+        uploads.append({"source": str(source), "key": key})
+
+    def fake_save_video(video, output_path, audio_path, fps):
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_bytes(b"mp4")
+        return worker_module._file_facts(Path(output_path))
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            worker_module.WORK_ROOT = Path(tmpdir)
+            worker_module.download_file = fake_download_file
+            worker_module.upload_file = fake_upload_file
+            worker_module._save_video_and_merge_audio = fake_save_video
+
+            pipeline = FakePipeline()
+            worker = Wan22S2VPersistentWorker(Wan22S2VPersistentWorkerConfig(model_dir=Path("/tmp/no-model")))
+            worker.worker_state = "ready"
+            worker._pipeline = pipeline
+            worker.load_count = 1
+            worker.t5_cpu_effective = False
+            worker.offload_model_effective = True
+            worker.convert_model_dtype_effective = True
+            worker.worker_baseline_memory = {
+                "memory_allocated_gib": 10.0,
+                "memory_reserved_gib": 20.0,
+                "free_margin_gib": 70.0,
+            }
+
+            base_payload = {
+                "character_id": "mae",
+                "base_taught_language": "FR",
+                "reference_image_key": "tests/input/reference.png",
+                "audio_key": "tests/input/audio.wav",
+                "target_width": 720,
+                "target_height": 720,
+                "fps": 16,
+                "target_duration_seconds": 15.0,
+                "confirm_inference": "RUN_WAN22_S2V_BLACKWELL_NATIVE_PARTIAL",
+                "allow_oom_fallback": False,
+                "seed": 42,
+                "steps": 5,
+                "cfg": 1.0,
+                "shift": 4.0,
+                "offload_model": True,
+            }
+            first = worker.run_job(
+                {
+                    **base_payload,
+                    "job_id": "persistent_job_1",
+                    "output_video_key": "tests/output/job1.mp4",
+                    "output_report_key": "tests/output/job1_report.json",
+                }
+            )
+            second = worker.run_job(
+                {
+                    **base_payload,
+                    "job_id": "persistent_job_2",
+                    "output_video_key": "tests/output/job2.mp4",
+                    "output_report_key": "tests/output/job2_report.json",
+                }
+            )
+            assert_true(first["status"] == "succeeded", "expected first persistent job to succeed")
+            assert_true(second["status"] == "succeeded", "expected second persistent job to succeed")
+            assert_true(first["uses_subprocess"] is False, "expected no subprocess for persistent job")
+            assert_true(second["uses_subprocess"] is False, "expected no subprocess for persistent job")
+            assert_true(first["load_count_before"] == 1 and first["load_count_after"] == 1, "expected first job not to reload")
+            assert_true(second["load_count_before"] == 1 and second["load_count_after"] == 1, "expected second job not to reload")
+            assert_true(first["jobs_completed"] == 1, "expected jobs_completed=1 after first job")
+            assert_true(second["jobs_completed"] == 2, "expected jobs_completed=2 after second job")
+            assert_true(len(pipeline.calls) == 2, "expected two generate calls on the same pipeline object")
+            assert_true(pipeline.calls[0]["input_prompt"], "expected resolved Maé prompt")
+            assert_true(pipeline.calls[0]["max_area"] == 720 * 720, "expected 720x720 max_area")
+            assert_true(first["video_generated"] is True and second["video_generated"] is True, "expected MP4 generation")
+            assert_true(worker.worker_state == "ready", "expected worker ready after sequential jobs")
+            assert_true(len(uploads) == 4, "expected two video uploads and two report uploads")
+            assert_true(first["t5_cpu_effective"] is False, "expected t5_cpu false")
+    finally:
+        worker_module.download_file = original_download_file
+        worker_module.upload_file = original_upload_file
+        worker_module._save_video_and_merge_audio = original_save_video
+        worker_module.WORK_ROOT = original_work_root
 
 
 def test_endpoint_contracts_present() -> None:
@@ -129,6 +242,7 @@ def test_endpoint_contracts_present() -> None:
         '@app.post("/jobs/wan22-s2v/run")',
         '@app.post("/admin/persistent-worker/load-probe")',
         '@app.get("/admin/persistent-worker/status")',
+        '@app.post("/admin/persistent-worker/run-job")',
         '@app.post("/admin/persistent-worker/unload")',
     ):
         assert_true(route in text, f"missing endpoint route: {route}")
@@ -138,7 +252,7 @@ def main() -> int:
     test_effective_config()
     test_cleanup_and_recycle_policy()
     test_unload_state_guards()
-    test_run_job_probe_only()
+    test_run_job_two_jobs_simulated()
     test_endpoint_contracts_present()
     print("persistent worker probe tests OK")
     return 0

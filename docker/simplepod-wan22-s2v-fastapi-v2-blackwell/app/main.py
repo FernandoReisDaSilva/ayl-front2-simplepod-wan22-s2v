@@ -1527,6 +1527,20 @@ def persistent_worker_status() -> dict:
     return result
 
 
+@app.post("/admin/persistent-worker/run-job")
+def persistent_worker_run_job(payload: dict[str, Any]) -> dict:
+    require_admin_verify_enabled()
+    job_payload = validate_run_job_payload(payload)
+    worker = persistent_worker()
+    result = worker.run_job(job_payload)
+    result["probe_type"] = "persistent_worker_single_job"
+    result["subprocess_fallback_available"] = True
+    result["subprocess_fallback_endpoint"] = "/jobs/wan22-s2v/run"
+    if result.get("status") == "failed_worker_not_ready":
+        return JSONResponse(status_code=409, content=result)
+    return result
+
+
 @app.post("/admin/persistent-worker/unload")
 def persistent_worker_unload() -> dict:
     require_admin_verify_enabled()

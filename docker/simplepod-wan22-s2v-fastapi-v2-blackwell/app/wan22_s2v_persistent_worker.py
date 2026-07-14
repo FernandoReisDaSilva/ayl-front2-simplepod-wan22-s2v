@@ -1,4 +1,5 @@
 import gc
+import json
 import os
 import sys
 import threading
@@ -8,7 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .character_prompts import resolve_character_prompts
 from .reporting import now_iso
+from .r2_client import download_file, upload_file
 from .settings import Settings
 from .wan22_s2v_generate_wrapper import (
     RUNTIME_PATCH_REPORT,
@@ -20,6 +23,7 @@ from .wan22_s2v_generate_wrapper import (
 
 WORKER_STATES = {"unloaded", "loading", "ready", "running", "recycling", "failed"}
 SAFETENSORS_PATCH_ENV = "AYL_SAFETENSORS_CUDA_TO_CPU_PATCH"
+WORK_ROOT = Path("/tmp/ayl_wan22_s2v_persistent_jobs")
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,11 @@ class Wan22S2VPersistentWorkerConfig:
 
 def _truncate(value: Any, limit: int = 1000) -> str:
     return str(value)[:limit]
+
+
+def write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _import_torch():
@@ -124,6 +133,34 @@ def _resolve_wan_config(task: str):
         if hasattr(configs, name):
             return getattr(configs, name)
     raise RuntimeError(f"Could not resolve Wan2.2 config for task={task!r}.")
+
+
+def _max_area(width: int, height: int) -> int:
+    return int(width) * int(height)
+
+
+def _file_facts(path: Path) -> dict:
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "is_file": path.is_file(),
+        "size_bytes": path.stat().st_size if path.exists() else None,
+    }
+
+
+def _save_video_and_merge_audio(video, output_path: Path, audio_path: Path, fps: int) -> dict:
+    from wan.utils.utils import merge_video_audio, save_video
+
+    save_video(
+        tensor=video[None],
+        save_file=str(output_path),
+        fps=fps,
+        nrow=1,
+        normalize=True,
+        value_range=(-1, 1),
+    )
+    merge_video_audio(video_path=str(output_path), audio_path=str(audio_path))
+    return _file_facts(output_path)
 
 
 def _resident_model_object_summary(pipeline: Any) -> dict:
@@ -356,14 +393,192 @@ class Wan22S2VPersistentWorker:
 
     def run_job(self, job: dict) -> dict:
         with self.lock:
-            return {
-                "status": "not_implemented_probe_only",
-                "job_id": job.get("job_id") if isinstance(job, dict) else None,
-                "message": "Persistent worker probe currently supports load/status/unload only; it does not run inference.",
+            started = time.monotonic()
+            if self.worker_state != "ready":
+                return {
+                    "status": "failed_worker_not_ready",
+                    "job_id": job.get("job_id") if isinstance(job, dict) else None,
+                    "worker_state": self.worker_state,
+                    "inference_executed": False,
+                    "video_generated": False,
+                    **self._status_unlocked(),
+                }
+            if self._pipeline is None:
+                self.worker_state = "failed"
+                self.last_error = {"type": "PipelineMissing", "message": "Persistent WanS2V pipeline is missing."}
+                return {
+                    "status": "failed_pipeline_missing",
+                    "job_id": job.get("job_id") if isinstance(job, dict) else None,
+                    "inference_executed": False,
+                    "video_generated": False,
+                    **self._status_unlocked(),
+                }
+
+            self.worker_state = "running"
+            self.current_job_id = str(job.get("job_id", ""))
+            load_count_before = self.load_count
+            temp_refs: list[Any] = []
+            report: dict[str, Any] = {
+                "job_id": self.current_job_id,
+                "status": "running",
+                "created_at": now_iso(),
+                "load_count_before": load_count_before,
+                "load_count_after": None,
+                "jobs_completed": self.jobs_completed,
                 "inference_executed": False,
                 "video_generated": False,
-                **self._status_unlocked(),
+                "downloads_model_weights": False,
+                "placeholder_generated": False,
+                "uses_subprocess": False,
+                "t5_cpu_effective": self.t5_cpu_effective,
+                "offload_model_effective": self.offload_model_effective,
+                "convert_model_dtype_effective": self.convert_model_dtype_effective,
+                "attention_backend_used": self.attention_patch_report.get("attention_backend_used"),
+                "attention_sdpa_patch": self.attention_patch_report,
+                "safetensors_cuda_to_cpu_patch": self.safetensors_patch_report,
             }
+            local_report_path: Path | None = None
+            output_path = Path()
+            try:
+                width = int(job.get("target_width") or job.get("width") or 720)
+                height = int(job.get("target_height") or job.get("height") or 720)
+                fps = int(job.get("fps") or 16)
+                seed = int(job.get("seed", 42))
+                steps = int(job.get("steps", 5))
+                shift = float(job.get("shift", 4.0))
+                cfg = float(job.get("cfg", 1.0))
+                prompt = resolve_character_prompts(str(job.get("character_id", "")))["positive_prompt"]
+                job_id = str(job["job_id"])
+                work_dir = WORK_ROOT / job_id
+                work_dir.mkdir(parents=True, exist_ok=True)
+                input_image = work_dir / "reference.png"
+                input_audio = work_dir / "audio.wav"
+                output_path = work_dir / f"{job_id}_{width}x{height}.mp4"
+                local_report_path = work_dir / "final_report.json"
+
+                report.update(
+                    {
+                        "width": width,
+                        "height": height,
+                        "resolution": f"{width}x{height}",
+                        "fps": fps,
+                        "target_duration_seconds": job.get("target_duration_seconds"),
+                        "output_video_key": job["output_video_key"],
+                        "output_report_key": job["output_report_key"],
+                        "seed": seed,
+                        "steps": steps,
+                        "cfg": cfg,
+                        "shift": shift,
+                        "output_path": str(output_path),
+                    }
+                )
+
+                _safe_cuda_synchronize()
+                _safe_reset_peak_memory_stats()
+                before = _cuda_memory_snapshot()
+                report["memory_allocated_before_gb"] = before.get("memory_allocated_gib")
+                report["memory_reserved_before_gb"] = before.get("memory_reserved_gib")
+
+                download_file(job["reference_image_key"], input_image)
+                download_file(job["audio_key"], input_audio)
+                report["input_files"] = {
+                    "reference_image": _file_facts(input_image),
+                    "audio": _file_facts(input_audio),
+                }
+
+                generation_started = time.monotonic()
+                report["inference_executed"] = True
+                video = self._pipeline.generate(
+                    input_prompt=prompt,
+                    ref_image_path=str(input_image),
+                    audio_path=str(input_audio),
+                    enable_tts=False,
+                    tts_prompt_audio=None,
+                    tts_prompt_text=None,
+                    tts_text=None,
+                    num_repeat=None,
+                    pose_video=None,
+                    max_area=_max_area(width, height),
+                    infer_frames=int(job.get("infer_frames") or 80),
+                    shift=shift,
+                    sample_solver="unipc",
+                    sampling_steps=steps,
+                    guide_scale=cfg,
+                    seed=seed,
+                    offload_model=bool(job.get("offload_model", self.config.offload_model)),
+                    init_first_frame=False,
+                )
+                temp_refs.append(video)
+                _safe_cuda_synchronize()
+                report["generation_seconds"] = round(time.monotonic() - generation_started, 3)
+                peak = _cuda_memory_snapshot()
+                report["peak_memory_allocated_gb"] = peak.get("max_memory_allocated_gib")
+                report["peak_memory_reserved_gb"] = peak.get("max_memory_reserved_gib")
+                report["peak_vram_gb"] = peak.get("max_memory_allocated_gib")
+
+                save_started = time.monotonic()
+                output_facts = _save_video_and_merge_audio(video, output_path, input_audio, fps)
+                report["save_merge_seconds"] = round(time.monotonic() - save_started, 3)
+                report["output_file"] = output_facts
+                if not output_facts["exists"] or not output_facts["is_file"] or not output_facts["size_bytes"]:
+                    raise RuntimeError("Persistent worker output MP4 was not created or is empty.")
+
+                upload_file(output_path, job["output_video_key"])
+                report["video_generated"] = True
+                report["r2_upload_attempted"] = True
+                self.jobs_completed += 1
+                cleanup = self.cleanup_after_job(temp_refs, cuda_failure=False)
+                report["cleanup_seconds"] = cleanup["cleanup_seconds"]
+                after = cleanup["memory_after_cleanup"]
+                report["memory_allocated_after_cleanup_gb"] = after.get("memory_allocated_gib")
+                report["memory_reserved_after_cleanup_gb"] = after.get("memory_reserved_gib")
+                report["resident_vram_allocated_gb"] = self.worker_baseline_memory.get("memory_allocated_gib")
+                report["resident_vram_reserved_gb"] = self.worker_baseline_memory.get("memory_reserved_gib")
+                report["residual_growth_vs_worker_baseline_gb"] = cleanup.get("residual_growth_vs_worker_baseline_gib")
+                report["free_margin_after_cleanup_gb"] = after.get("free_margin_gib")
+                recycle_decision = self._should_recycle_unlocked()
+                report["recycle_required"] = recycle_decision["should_recycle"]
+                report["recycle_reason"] = recycle_decision["reasons"]
+                report["load_count_after"] = self.load_count
+                report["jobs_completed"] = self.jobs_completed
+                report["runtime_seconds"] = round(time.monotonic() - started, 3)
+                report["status"] = "succeeded"
+                report["worker_state_after_job"] = "ready"
+                write_json(local_report_path, report)
+                upload_file(local_report_path, job["output_report_key"])
+                report["report_uploaded_to_r2"] = True
+                self.worker_state = "ready"
+                self.current_job_id = None
+                return report
+            except Exception as exc:
+                cleanup = self.cleanup_after_job(temp_refs, cuda_failure="cuda" in str(exc).lower())
+                self.worker_state = "failed"
+                self.last_error = {
+                    "type": type(exc).__name__,
+                    "message": _truncate(exc),
+                    "traceback_tail": traceback.format_exc().splitlines()[-20:],
+                }
+                report.update(
+                    {
+                        "status": "failed",
+                        "error_type": type(exc).__name__,
+                        "error_truncated": _truncate(exc),
+                        "traceback_tail": traceback.format_exc().splitlines()[-20:],
+                        "cleanup_seconds": cleanup.get("cleanup_seconds"),
+                        "load_count_after": self.load_count,
+                        "jobs_completed": self.jobs_completed,
+                        "runtime_seconds": round(time.monotonic() - started, 3),
+                    }
+                )
+                if local_report_path is not None:
+                    write_json(local_report_path, report)
+                    try:
+                        upload_file(local_report_path, job["output_report_key"])
+                        report["report_uploaded_to_r2"] = True
+                    except Exception:
+                        pass
+                self.current_job_id = None
+                return report
 
     def cleanup_after_job(self, temporary_objects: list[Any] | None = None, cuda_failure: bool = False) -> dict:
         started = time.monotonic()
@@ -464,6 +679,12 @@ class Wan22S2VPersistentWorker:
                 if self._restore_attention_patch is not None:
                     self._restore_attention_patch()
                     self._restore_attention_patch = None
+                    self.attention_patch_report = {
+                        **RUNTIME_PATCH_REPORT.get("attention_sdpa_patch", {}),
+                        "patch_scope": "worker_lifetime",
+                        "restore_on_unload": True,
+                        "restored_on_unload": True,
+                    }
                 gc.collect()
                 _safe_cuda_empty_cache()
                 _safe_cuda_ipc_collect()
