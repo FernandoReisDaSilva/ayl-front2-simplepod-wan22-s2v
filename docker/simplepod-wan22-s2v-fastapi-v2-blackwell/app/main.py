@@ -90,6 +90,9 @@ ASYNC_JOBS: dict[str, dict[str, Any]] = {}
 ASYNC_RUNNING_JOB_IDS: set[str] = set()
 PERSISTENT_WORKER_LOCK = threading.Lock()
 PERSISTENT_WORKER: Wan22S2VPersistentWorker | None = None
+PERSISTENT_WORKER_JOBS_LOCK = threading.Lock()
+PERSISTENT_WORKER_JOBS: dict[str, dict[str, Any]] = {}
+PERSISTENT_WORKER_RUNNING_JOB_IDS: set[str] = set()
 RELEVANT_PACKAGES = (
     "torch",
     "torchvision",
@@ -551,6 +554,44 @@ def update_async_job(job_id: str, **updates: Any) -> None:
             ASYNC_JOBS[job_id].update(updates)
 
 
+def summarize_persistent_worker_job(report: Any, worker_snapshot: dict | None = None) -> dict:
+    worker_snapshot = worker_snapshot or {}
+    if not isinstance(report, dict):
+        report = {}
+    return {
+        "job_id": report.get("job_id"),
+        "status": report.get("status"),
+        "output_video_key": report.get("output_video_key"),
+        "output_report_key": report.get("output_report_key"),
+        "runtime_seconds": report.get("runtime_seconds"),
+        "generation_seconds": report.get("generation_seconds"),
+        "peak_vram_gb": report.get("peak_vram_gb"),
+        "worker_state": worker_snapshot.get("worker_state"),
+        "jobs_completed": worker_snapshot.get("jobs_completed"),
+        "load_count": worker_snapshot.get("load_count"),
+        "recycle_required": report.get("recycle_required"),
+        "error_type": report.get("error_type"),
+        "error_truncated": report.get("error_truncated"),
+    }
+
+
+def persistent_worker_job_snapshot(job_id: str) -> dict:
+    with PERSISTENT_WORKER_JOBS_LOCK:
+        job = PERSISTENT_WORKER_JOBS.get(job_id)
+        if not job:
+            raise HTTPException(
+                status_code=404,
+                detail={"message": "Persistent worker job not found.", "job_id": job_id},
+            )
+        return dict(job)
+
+
+def update_persistent_worker_job(job_id: str, **updates: Any) -> None:
+    with PERSISTENT_WORKER_JOBS_LOCK:
+        if job_id in PERSISTENT_WORKER_JOBS:
+            PERSISTENT_WORKER_JOBS[job_id].update(updates)
+
+
 def persistent_worker() -> Wan22S2VPersistentWorker:
     global PERSISTENT_WORKER
     settings = get_settings()
@@ -590,6 +631,58 @@ def run_async_wan22_job(job_id: str, payload: dict[str, Any]) -> None:
     finally:
         with ASYNC_JOBS_LOCK:
             ASYNC_RUNNING_JOB_IDS.discard(job_id)
+
+
+def run_persistent_worker_background_job(job_id: str, payload: dict[str, Any]) -> None:
+    worker = persistent_worker()
+    started_monotonic = time.monotonic()
+    update_persistent_worker_job(job_id, status="running", started_at=now_iso())
+    try:
+        report = worker.run_job(payload)
+        worker_snapshot = worker.status()
+        terminal_status = "succeeded" if isinstance(report, dict) and report.get("status") == "succeeded" else "failed"
+        update_persistent_worker_job(
+            job_id,
+            status=terminal_status,
+            completed_at=now_iso(),
+            runtime_seconds=round(time.monotonic() - started_monotonic, 3),
+            generation_seconds=report.get("generation_seconds") if isinstance(report, dict) else None,
+            peak_vram_gb=report.get("peak_vram_gb") if isinstance(report, dict) else None,
+            worker_state=worker_snapshot.get("worker_state"),
+            jobs_completed=worker_snapshot.get("jobs_completed"),
+            load_count=worker_snapshot.get("load_count"),
+            recycle_required=report.get("recycle_required") if isinstance(report, dict) else None,
+            output_video_key=payload.get("output_video_key"),
+            output_report_key=payload.get("output_report_key"),
+            error=(
+                None
+                if terminal_status == "succeeded"
+                else {
+                    "type": report.get("error_type") if isinstance(report, dict) else "unknown",
+                    "message": report.get("error_truncated") if isinstance(report, dict) else "",
+                }
+            ),
+            summary=summarize_persistent_worker_job(report, worker_snapshot),
+            result=report if isinstance(report, dict) else {},
+        )
+    except Exception as exc:
+        worker_snapshot = worker.status()
+        update_persistent_worker_job(
+            job_id,
+            status="failed",
+            completed_at=now_iso(),
+            runtime_seconds=round(time.monotonic() - started_monotonic, 3),
+            worker_state=worker_snapshot.get("worker_state"),
+            jobs_completed=worker_snapshot.get("jobs_completed"),
+            load_count=worker_snapshot.get("load_count"),
+            recycle_required=True,
+            error={"type": type(exc).__name__, "message": str(exc)[:1000]},
+            summary={},
+            result={},
+        )
+    finally:
+        with PERSISTENT_WORKER_JOBS_LOCK:
+            PERSISTENT_WORKER_RUNNING_JOB_IDS.discard(job_id)
 
 
 @app.get("/health")
@@ -1539,6 +1632,104 @@ def persistent_worker_run_job(payload: dict[str, Any]) -> dict:
     if result.get("status") == "failed_worker_not_ready":
         return JSONResponse(status_code=409, content=result)
     return result
+
+
+@app.post("/admin/persistent-worker/jobs")
+def persistent_worker_submit_job(payload: dict[str, Any]):
+    require_admin_verify_enabled()
+    job_payload = validate_run_job_payload(payload)
+    worker = persistent_worker()
+    worker_status = worker.status()
+    if worker_status.get("worker_state") != "ready":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "rejected",
+                "reason": "worker_not_ready",
+                "worker_state": worker_status.get("worker_state"),
+                "current_job_id": worker_status.get("current_job_id"),
+            },
+        )
+    job_id = str(job_payload["job_id"])
+    created_at = now_iso()
+    with PERSISTENT_WORKER_JOBS_LOCK:
+        active_job_ids = sorted(PERSISTENT_WORKER_RUNNING_JOB_IDS)
+        if active_job_ids:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "rejected",
+                    "reason": "max_concurrent_jobs_reached",
+                    "max_concurrent_jobs": 1,
+                    "active_job_ids": active_job_ids,
+                },
+            )
+        if job_id in PERSISTENT_WORKER_JOBS and PERSISTENT_WORKER_JOBS[job_id].get("status") in {"queued", "running"}:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "rejected",
+                    "reason": "job_already_queued_or_running",
+                    "job_id": job_id,
+                },
+            )
+        PERSISTENT_WORKER_RUNNING_JOB_IDS.add(job_id)
+        PERSISTENT_WORKER_JOBS[job_id] = {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": created_at,
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+            "output_video_key": job_payload["output_video_key"],
+            "output_report_key": job_payload["output_report_key"],
+            "runtime_seconds": None,
+            "generation_seconds": None,
+            "peak_vram_gb": None,
+            "worker_state": worker_status.get("worker_state"),
+            "jobs_completed": worker_status.get("jobs_completed"),
+            "load_count": worker_status.get("load_count"),
+            "recycle_required": None,
+            "summary": {},
+            "result": {},
+        }
+    thread = threading.Thread(target=run_persistent_worker_background_job, args=(job_id, dict(job_payload)), daemon=True)
+    thread.start()
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "queued",
+            "job_id": job_id,
+            "created_at": created_at,
+            "status_url": f"/admin/persistent-worker/jobs/{job_id}",
+            "max_concurrent_jobs": 1,
+        },
+    )
+
+
+@app.get("/admin/persistent-worker/jobs/{job_id}")
+def persistent_worker_get_job(job_id: str) -> dict:
+    require_admin_verify_enabled()
+    job = persistent_worker_job_snapshot(job_id)
+    worker_snapshot = persistent_worker().status()
+    return {
+        "job_id": job.get("job_id"),
+        "status": job.get("status"),
+        "created_at": job.get("created_at"),
+        "started_at": job.get("started_at"),
+        "completed_at": job.get("completed_at"),
+        "error": job.get("error"),
+        "output_video_key": job.get("output_video_key"),
+        "output_report_key": job.get("output_report_key"),
+        "runtime_seconds": job.get("runtime_seconds"),
+        "generation_seconds": job.get("generation_seconds"),
+        "peak_vram_gb": job.get("peak_vram_gb"),
+        "worker_state": worker_snapshot.get("worker_state"),
+        "jobs_completed": worker_snapshot.get("jobs_completed"),
+        "load_count": worker_snapshot.get("load_count"),
+        "recycle_required": job.get("recycle_required"),
+        "summary": job.get("summary", {}),
+    }
 
 
 @app.post("/admin/persistent-worker/unload")

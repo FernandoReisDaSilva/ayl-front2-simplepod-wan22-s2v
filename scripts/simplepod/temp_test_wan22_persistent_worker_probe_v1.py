@@ -243,9 +243,82 @@ def test_endpoint_contracts_present() -> None:
         '@app.post("/admin/persistent-worker/load-probe")',
         '@app.get("/admin/persistent-worker/status")',
         '@app.post("/admin/persistent-worker/run-job")',
+        '@app.post("/admin/persistent-worker/jobs")',
+        '@app.get("/admin/persistent-worker/jobs/{job_id}")',
         '@app.post("/admin/persistent-worker/unload")',
     ):
         assert_true(route in text, f"missing endpoint route: {route}")
+
+
+def test_batch_async_polling_helpers() -> None:
+    scripts_root = REPO_ROOT / "scripts" / "simplepod"
+    sys.path.insert(0, str(scripts_root))
+    import temp_simplepod_persistent_worker_batch_probe_v1 as batch
+
+    class Args:
+        job_timeout_seconds = 60
+        job_poll_interval_seconds = 1
+
+    submit_calls = []
+    poll_calls = []
+    original_simple_post = batch.base.simple_post
+    original_simple_get = batch.base.simple_get
+    original_sleep = batch.time.sleep
+
+    def fake_simple_post(url, payload, timeout_seconds):
+        submit_calls.append({"url": url, "payload": payload, "timeout_seconds": timeout_seconds})
+        return {
+            "status": "succeeded",
+            "http_status_code": 202,
+            "json": {"status": "queued", "job_id": payload["job_id"]},
+        }
+
+    poll_sequence = [
+        {"status": "failed", "error_type": "URLError", "error_truncated": "temporary poll failure"},
+        {"status": "succeeded", "http_status_code": 200, "json": {"job_id": "job1", "status": "queued"}},
+        {"status": "succeeded", "http_status_code": 200, "json": {"job_id": "job1", "status": "running"}},
+        {
+            "status": "succeeded",
+            "http_status_code": 200,
+            "json": {
+                "job_id": "job1",
+                "status": "succeeded",
+                "started_at": "start",
+                "completed_at": "done",
+                "runtime_seconds": 10,
+                "generation_seconds": 8,
+                "peak_vram_gb": 70,
+                "worker_state": "ready",
+                "jobs_completed": 1,
+                "load_count": 1,
+                "recycle_required": False,
+            },
+        },
+    ]
+
+    def fake_simple_get(url, timeout_seconds):
+        poll_calls.append({"url": url, "timeout_seconds": timeout_seconds})
+        return poll_sequence.pop(0)
+
+    try:
+        batch.base.simple_post = fake_simple_post
+        batch.base.simple_get = fake_simple_get
+        batch.time.sleep = lambda _seconds: None
+        submission = batch.submit_persistent_worker_job("http://pod", {"job_id": "job1"})
+        assert_true(submission["result"]["http_status_code"] == 202, "expected async submission HTTP 202")
+        assert_true(len(submit_calls) == 1, "expected job submitted exactly once")
+
+        poll_result = batch.poll_persistent_worker_job("http://pod", "job1", Args())
+        assert_true(poll_result["status"] == "succeeded", "expected queued->running->succeeded polling")
+        assert_true(poll_result["json"]["status"] == "succeeded", "expected terminal succeeded")
+        assert_true(poll_result["poll_count"] == 4, "expected one failed poll plus three status polls")
+        assert_true(len(poll_result["poll_failures"]) == 1, "expected one recorded poll failure")
+        assert_true(poll_result["recovered_after_poll_failure"] is True, "expected recovery after poll failure")
+        assert_true(len(submit_calls) == 1, "expected polling not to resubmit job")
+    finally:
+        batch.base.simple_post = original_simple_post
+        batch.base.simple_get = original_simple_get
+        batch.time.sleep = original_sleep
 
 
 def main() -> int:
@@ -254,6 +327,7 @@ def main() -> int:
     test_unload_state_guards()
     test_run_job_two_jobs_simulated()
     test_endpoint_contracts_present()
+    test_batch_async_polling_helpers()
     print("persistent worker probe tests OK")
     return 0
 

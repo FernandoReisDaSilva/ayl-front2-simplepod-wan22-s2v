@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 SERVICE_NAME = "ayl-simplepod-wan22-s2v-fastapi-v2"
-SERVICE_VERSION = "0.2.29-blackwell-persistent-two-job-probe-v1"
+SERVICE_VERSION = "0.2.30-blackwell-persistent-worker-async-jobs-v1"
 
 R2_ENV_KEYS = (
     "R2_ENDPOINT",

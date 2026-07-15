@@ -16,8 +16,8 @@ SCRIPT_ID = "TEMP_SIMPLEPOD_PERSISTENT_WORKER_BATCH_PROBE_V1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_persistent_worker_batch_probe_v1.json"
 
-IMAGE_TAG = multi.IMAGE_TAG
-IMAGE_REF = multi.IMAGE_REF
+IMAGE_TAG = "0.2.30-blackwell-persistent-worker-async-jobs-v1"
+IMAGE_REF = f"ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:{IMAGE_TAG}"
 TEMPLATE_ID = multi.TEMPLATE_ID
 LOCAL_OUTPUT_DIR = REPO_ROOT / "data" / "character_cast" / "persistent_worker_batch_probe_v1" / "outputs"
 
@@ -27,6 +27,8 @@ OUTPUT_PREFIX = "tests/simplepod_persistent_worker_batch_probe_v1/outputs"
 LOAD_PROBE_ENDPOINT = multi.LOAD_PROBE_ENDPOINT
 STATUS_ENDPOINT = multi.STATUS_ENDPOINT
 RUN_JOB_ENDPOINT = multi.RUN_JOB_ENDPOINT
+ASYNC_JOB_SUBMIT_ENDPOINT = "/admin/persistent-worker/jobs"
+ASYNC_JOB_STATUS_ENDPOINT = "/admin/persistent-worker/jobs/{job_id}"
 UNLOAD_ENDPOINT = multi.UNLOAD_ENDPOINT
 
 
@@ -306,8 +308,10 @@ def r2_object_exists(key: str) -> dict:
 def runtime_payload(instance_market: str) -> dict:
     payload = multi.runtime_payload(instance_market)
     for item in payload.get("envVariables", []):
+        if item.get("name") == "AYL_IMAGE_TAG":
+            item["value"] = IMAGE_TAG
         if item.get("name") == "AYL_RUNTIME_VERSION":
-            item["value"] = "v2-blackwell-persistent-batch-probe-v1"
+            item["value"] = "v2-blackwell-persistent-worker-async-jobs-v1"
     return payload
 
 
@@ -440,13 +444,13 @@ def per_job_statistics(data: dict) -> dict:
             "status": result.get("status"),
             "runtime_seconds": result.get("runtime_seconds"),
             "generation_seconds": result.get("generation_seconds"),
-            "save_merge_seconds": result.get("save_merge_seconds"),
             "peak_vram_gb": result.get("peak_vram_gb"),
-            "resident_vram_reserved_gb": result.get("resident_vram_reserved_gb"),
-            "load_count_before": result.get("load_count_before"),
-            "load_count_after": result.get("load_count_after"),
+            "load_count": result.get("load_count"),
+            "jobs_completed": result.get("jobs_completed"),
             "jobs_completed_after_status": status_after.get("jobs_completed"),
             "recycle_required": result.get("recycle_required"),
+            "submission_http_status": record.get("submission_http_status"),
+            "submission_seconds": record.get("submission_seconds"),
             "http_response_received": record.get("http_response_received"),
             "client_timeout_occurred": record.get("client_timeout_occurred"),
             "recovered_from_worker_status": record.get("recovered_from_worker_status"),
@@ -471,16 +475,13 @@ def report_summary(manifest: dict, data: dict) -> dict:
         if result.get("status") in {"succeeded", "succeeded_recovered_from_status"}
     ]
     load_counts = [
-        result.get("load_count_after")
+        result.get("load_count")
         for result in job_results
-        if result.get("load_count_after") is not None
+        if result.get("load_count") is not None
     ]
     reloads = 0
     for result in succeeded:
-        if result.get("status") == "succeeded_recovered_from_status":
-            if result.get("load_count_after") != 1:
-                reloads += 1
-        elif result.get("load_count_before") != result.get("load_count_after"):
+        if result.get("load_count") != 1:
             reloads += 1
     return {
         "jobs_requested": len(manifest_jobs(manifest)),
@@ -496,15 +497,14 @@ def report_summary(manifest: dict, data: dict) -> dict:
 
 def safety_gate(job_index: int, job_result: dict, status_json: dict) -> tuple[bool, list[str]]:
     reasons = []
-    recovered = isinstance(job_result, dict) and job_result.get("status") == "succeeded_recovered_from_status"
-    if not isinstance(job_result, dict) or job_result.get("status") not in {"succeeded", "succeeded_recovered_from_status"}:
+    if not isinstance(job_result, dict) or job_result.get("status") != "succeeded":
         reasons.append("job_not_succeeded")
     if job_result.get("recycle_required") is True:
         reasons.append("job_requested_recycle")
-    if not recovered and job_result.get("load_count_before") != job_result.get("load_count_after"):
-        reasons.append("load_count_changed")
-    if job_result.get("load_count_after") != 1:
+    if job_result.get("load_count") != 1:
         reasons.append("load_count_not_1")
+    if job_result.get("jobs_completed") != job_index:
+        reasons.append("job_status_jobs_completed_mismatch")
     if isinstance(status_json, dict):
         if status_json.get("worker_state") != "ready":
             reasons.append("worker_state_not_ready")
@@ -587,6 +587,82 @@ def recover_job_after_lost_response(proxy_url: str, index: int, payload: dict) -
     }
 
 
+def submit_persistent_worker_job(proxy_url: str, payload: dict) -> dict:
+    started = time.monotonic()
+    result = base.simple_post(proxy_url + ASYNC_JOB_SUBMIT_ENDPOINT, payload, timeout_seconds=60)
+    return {
+        "submission_seconds": round(time.monotonic() - started, 3),
+        "result": result,
+        "compact": compact_http_result(result),
+    }
+
+
+def poll_persistent_worker_job(proxy_url: str, job_id: str, args: argparse.Namespace) -> dict:
+    started = time.monotonic()
+    poll_count = 0
+    poll_failures = []
+    recovered_after_poll_failure = False
+    last_json = {}
+    while True:
+        elapsed = time.monotonic() - started
+        if elapsed > args.job_timeout_seconds:
+            return {
+                "status": "timeout",
+                "job_id": job_id,
+                "poll_count": poll_count,
+                "poll_failures": poll_failures,
+                "client_wait_seconds": round(elapsed, 3),
+                "last_json": last_json,
+                "recovered_after_poll_failure": recovered_after_poll_failure,
+                "error_type": "JobTimeout",
+                "error_truncated": f"Persistent worker job did not finish within {args.job_timeout_seconds}s.",
+            }
+        poll_count += 1
+        result = base.simple_get(
+            proxy_url + ASYNC_JOB_STATUS_ENDPOINT.format(job_id=job_id),
+            timeout_seconds=30,
+        )
+        body = result.get("json") if isinstance(result.get("json"), dict) else {}
+        if result.get("http_status_code") == 200 and body:
+            if poll_failures:
+                recovered_after_poll_failure = True
+            last_json = body
+            job_status = body.get("status")
+            print(f"[{SCRIPT_ID}] job_status={job_status} job_id={job_id} elapsed={int(elapsed)}s", flush=True)
+            if job_status in {"succeeded", "failed"}:
+                return {
+                    "status": "succeeded",
+                    "job_id": job_id,
+                    "poll_count": poll_count,
+                    "poll_failures": poll_failures,
+                    "client_wait_seconds": round(time.monotonic() - started, 3),
+                    "json": body,
+                    "recovered_after_poll_failure": recovered_after_poll_failure,
+                }
+        else:
+            poll_failures.append(
+                {
+                    "poll_count": poll_count,
+                    "elapsed_seconds": round(elapsed, 3),
+                    "http_status_code": result.get("http_status_code"),
+                    "status": result.get("status"),
+                    "error_type": result.get("error_type", ""),
+                    "error_truncated": result.get("error_truncated", ""),
+                }
+            )
+        time.sleep(max(1, args.job_poll_interval_seconds))
+
+
+def r2_outputs_for_payload(payload: dict) -> dict:
+    video = r2_object_exists(payload["output_video_key"])
+    report = r2_object_exists(payload["output_report_key"])
+    return {
+        "video": video,
+        "report": report,
+        "both_exist": bool(video.get("exists") and report.get("exists")),
+    }
+
+
 def delete_instance(base_url: str, api_key: str, instance_id: int | None, data: dict, timer: PhaseTimer) -> None:
     if instance_id is None:
         data["delete_result"] = {"attempted": False, "status": "skipped_no_instance_id"}
@@ -644,7 +720,9 @@ def build_report(args: argparse.Namespace, manifest: dict, status: str, data: di
             "health": "/health",
             "load_probe": LOAD_PROBE_ENDPOINT,
             "status": STATUS_ENDPOINT,
-            "run_job": RUN_JOB_ENDPOINT,
+            "run_job_sync_rollback": RUN_JOB_ENDPOINT,
+            "submit_job": ASYNC_JOB_SUBMIT_ENDPOINT,
+            "job_status": ASYNC_JOB_STATUS_ENDPOINT,
             "unload": UNLOAD_ENDPOINT,
         },
         "safety_guards": {
@@ -795,50 +873,64 @@ def run(args: argparse.Namespace) -> int:
 
         for index, job in enumerate(manifest_jobs(manifest), start=1):
             payload = job_payload(job)
-            print(f"[{SCRIPT_ID}] run_job index={index}/{len(manifest_jobs(manifest))} job_id={payload['job_id']}", flush=True)
-            with timer.phase(f"persistent_worker_run_job_{index}"):
-                job_result = base.simple_post(proxy_url + RUN_JOB_ENDPOINT, payload, timeout_seconds=args.job_timeout_seconds)
-            http_response_received = job_result.get("http_status_code") is not None and isinstance(job_result.get("json"), dict)
-            client_timeout_occurred = response_lost_or_timed_out(job_result)
+            print(f"[{SCRIPT_ID}] submit_job index={index}/{len(manifest_jobs(manifest))} job_id={payload['job_id']}", flush=True)
+            with timer.phase(f"persistent_worker_submit_job_{index}"):
+                submission = submit_persistent_worker_job(proxy_url, payload)
+            submission_result = submission["result"]
+            submission_json = submission_result.get("json") if isinstance(submission_result.get("json"), dict) else {}
             job_record = {
                 "name": job.get("name", ""),
                 "payload": payload,
-                "result": compact_http_result(job_result),
-                "http_response_received": http_response_received,
-                "client_timeout_occurred": client_timeout_occurred,
+                "submission": submission["compact"],
+                "submission_http_status": submission_result.get("http_status_code"),
+                "submission_seconds": submission["submission_seconds"],
+                "result": {},
+                "http_response_received": True,
+                "client_timeout_occurred": False,
                 "recovered_from_worker_status": False,
                 "recovered_from_r2_outputs": False,
                 "recovery_seconds": None,
-                "original_error_type": job_result.get("error_type", ""),
+                "original_error_type": submission_result.get("error_type", ""),
+                "poll_count": 0,
+                "poll_failures": [],
+                "job_started_at": None,
+                "job_completed_at": None,
+                "server_runtime_seconds": None,
+                "client_wait_seconds": None,
+                "recovered_after_poll_failure": False,
             }
             data["jobs_by_index"][str(index)] = job_record
-            job_json = job_result.get("json") if isinstance(job_result.get("json"), dict) else {}
-            if (
-                (job_result.get("http_status_code") != 200 or job_json.get("status") != "succeeded")
-                and client_timeout_occurred
-            ):
-                with timer.phase(f"persistent_worker_recover_job_{index}"):
-                    recovery = recover_job_after_lost_response(proxy_url, index, payload)
-                job_record["recovery"] = recovery
-                job_record["recovered_from_worker_status"] = bool(recovery.get("json", {}).get("recovered_from_worker_status"))
-                job_record["recovered_from_r2_outputs"] = bool(recovery.get("json", {}).get("recovered_from_r2_outputs"))
-                job_record["recovery_seconds"] = recovery.get("recovery_seconds")
-                if recovery.get("recovered"):
-                    job_record["result"] = {
-                        "status": "succeeded",
-                        "http_status_code": None,
-                        "json": recovery["json"],
-                        "recovered_from_lost_http_response": True,
-                    }
-                    job_json = recovery["json"]
-                    print(f"[{SCRIPT_ID}] recovered_job index={index} job_id={payload['job_id']}", flush=True)
-                else:
-                    status = f"job_{index}_failed_recovery_checks"
-                    return 1
-            if job_result.get("http_status_code") != 200 or job_json.get("status") != "succeeded":
-                if job_json.get("status") != "succeeded_recovered_from_status":
-                    status = f"job_{index}_failed"
-                    return 1
+            if submission_result.get("http_status_code") != 202 or submission_json.get("job_id") != payload["job_id"]:
+                status = f"job_{index}_submission_failed"
+                return 1
+
+            with timer.phase(f"persistent_worker_poll_job_{index}"):
+                poll_result = poll_persistent_worker_job(proxy_url, payload["job_id"], args)
+            job_record["poll_result"] = poll_result
+            job_record["poll_count"] = poll_result.get("poll_count", 0)
+            job_record["poll_failures"] = poll_result.get("poll_failures", [])
+            job_record["client_wait_seconds"] = poll_result.get("client_wait_seconds")
+            job_record["recovered_after_poll_failure"] = poll_result.get("recovered_after_poll_failure", False)
+            job_json = poll_result.get("json") if isinstance(poll_result.get("json"), dict) else {}
+            job_record["job_started_at"] = job_json.get("started_at")
+            job_record["job_completed_at"] = job_json.get("completed_at")
+            job_record["server_runtime_seconds"] = job_json.get("runtime_seconds")
+            job_record["result"] = {
+                "status": poll_result.get("status"),
+                "http_status_code": 200 if poll_result.get("status") == "succeeded" else None,
+                "json": job_json,
+            }
+            if poll_result.get("status") != "succeeded" or job_json.get("status") != "succeeded":
+                status = f"job_{index}_failed"
+                return 1
+
+            with timer.phase(f"persistent_worker_check_r2_outputs_{index}"):
+                r2_outputs = r2_outputs_for_payload(payload)
+            job_record["r2_outputs"] = r2_outputs
+            job_record["recovered_from_r2_outputs"] = bool(r2_outputs.get("both_exist"))
+            if not r2_outputs.get("both_exist"):
+                status = f"job_{index}_missing_r2_outputs"
+                return 1
 
             with timer.phase(f"persistent_worker_status_after_job_{index}"):
                 status_after_job = base.simple_get(proxy_url + STATUS_ENDPOINT, timeout_seconds=30)
@@ -907,6 +999,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ready-timeout-seconds", type=int, default=900)
     parser.add_argument("--load-probe-timeout-seconds", type=int, default=1800)
     parser.add_argument("--job-timeout-seconds", type=int, default=1800)
+    parser.add_argument("--job-poll-interval-seconds", type=int, default=15)
     parser.add_argument("--unload-timeout-seconds", type=int, default=300)
     return parser.parse_args()
 
