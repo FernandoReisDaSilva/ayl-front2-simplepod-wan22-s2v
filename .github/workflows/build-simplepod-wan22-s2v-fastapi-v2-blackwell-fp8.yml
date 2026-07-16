@@ -1,0 +1,70 @@
+name: Build SimplePod Wan2.2 S2V Blackwell FP8 Runtime Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Experimental FP8 runtime probe image tag."
+        required: true
+        default: "0.3.00-blackwell-fp8-runtime-probe-v1"
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2
+
+jobs:
+  build:
+    name: Build and publish FP8 runtime probe image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free runner disk space
+        run: |
+          echo "Disk before cleanup"
+          df -h
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache
+          docker system prune -af || true
+          echo "Disk after cleanup"
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate probe syntax
+        run: python3 -m py_compile scripts/fp8/temp_fp8_runtime_probe_v1.py
+
+      - name: Build FP8 runtime probe image
+        run: |
+          docker build \
+            -f docker/simplepod-wan22-s2v-fastapi-v2-blackwell-fp8/Dockerfile \
+            -t "${IMAGE_NAME}:${{ inputs.image_tag }}" \
+            .
+
+      - name: Validate TorchAO imports inside image
+        run: |
+          docker run --rm "${IMAGE_NAME}:${{ inputs.image_tag }}" python - <<'PY'
+          import torch
+          import torchao
+          from torchao.quantization import Float8WeightOnlyConfig, quantize_
+          print("torch", torch.__version__)
+          print("torch_cuda", getattr(torch.version, "cuda", ""))
+          print("torchao", getattr(torchao, "__version__", ""))
+          print("Float8WeightOnlyConfig", Float8WeightOnlyConfig)
+          print("quantize_", quantize_)
+          PY
+
+      - name: Push FP8 runtime probe image
+        run: docker push "${IMAGE_NAME}:${{ inputs.image_tag }}"

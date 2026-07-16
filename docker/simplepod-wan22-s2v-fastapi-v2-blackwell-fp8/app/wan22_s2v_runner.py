@@ -1,0 +1,671 @@
+import json
+import os
+import subprocess
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+from .character_prompts import resolve_character_prompts
+from .r2_client import download_file, get_r2_client, head_object, r2_env_alias_presence, r2_env_ready, resolved_r2_env, upload_file
+from .reporting import now_iso
+from .settings import get_settings
+
+
+OUTPUT_TRUNCATE_CHARS = 4000
+WORK_ROOT = Path("/tmp/ayl_wan22_s2v_jobs")
+OOM_MARKERS = (
+    "cuda out of memory",
+    "outofmemoryerror",
+    "cublas_status_alloc_failed",
+    "cudnn_status_alloc_failed",
+)
+WAN22_PARAMETER_FIELDS = (
+    "seed",
+    "steps",
+    "cfg",
+    "shift",
+    "denoise_strength",
+    "audio_scale",
+    "pose_start_percent",
+    "pose_end_percent",
+    "num_frames",
+)
+SUPPORTED_WAN22_PARAMETER_FIELDS = (
+    "seed",
+    "steps",
+    "cfg",
+    "shift",
+)
+UNSUPPORTED_NATIVE_WAN22_PARAMETER_FIELDS = (
+    "denoise_strength",
+    "audio_scale",
+    "pose_start_percent",
+    "pose_end_percent",
+    "num_frames",
+)
+
+
+def truncate_output(value: str) -> str:
+    if len(value) <= OUTPUT_TRUNCATE_CHARS:
+        return value
+    return value[-OUTPUT_TRUNCATE_CHARS:]
+
+
+def write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def gpu_snapshot() -> dict:
+    command = [
+        "nvidia-smi",
+        "--query-gpu=name,memory.total,memory.used,utilization.gpu",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=10)
+    except Exception as exc:
+        return {"status": "failed", "error_type": type(exc).__name__, "error_truncated": str(exc)[:500]}
+    if completed.returncode != 0:
+        return {"status": "failed", "stderr_truncated": truncate_output(completed.stderr or "")}
+    line = (completed.stdout or "").strip().splitlines()[0] if completed.stdout else ""
+    parts = [part.strip() for part in line.split(",")]
+    if len(parts) < 4:
+        return {"status": "failed", "stdout_truncated": truncate_output(completed.stdout or "")}
+    try:
+        total_mib = float(parts[1])
+        used_mib = float(parts[2])
+        util = float(parts[3])
+    except ValueError:
+        total_mib = used_mib = util = None
+    return {
+        "status": "succeeded",
+        "gpuModel": parts[0],
+        "memory_total_mib": total_mib,
+        "memory_total_gib": round(total_mib / 1024.0, 3) if total_mib is not None else None,
+        "memory_used_mib": used_mib,
+        "memory_used_gib": round(used_mib / 1024.0, 3) if used_mib is not None else None,
+        "utilization_gpu_percent": util,
+    }
+
+
+class GpuMonitor:
+    def __init__(self, interval_seconds: float = 5.0) -> None:
+        self.interval_seconds = interval_seconds
+        self.samples: list[dict] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=10)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            sample = gpu_snapshot()
+            sample["timestamp"] = now_iso()
+            self.samples.append(sample)
+            self._stop.wait(self.interval_seconds)
+
+    def summary(self) -> dict:
+        usable = [sample for sample in self.samples if sample.get("status") == "succeeded"]
+        used_values = [sample.get("memory_used_gib") for sample in usable if sample.get("memory_used_gib") is not None]
+        util_values = [sample.get("utilization_gpu_percent") for sample in usable if sample.get("utilization_gpu_percent") is not None]
+        total_values = [sample.get("memory_total_gib") for sample in usable if sample.get("memory_total_gib") is not None]
+        return {
+            "samples": len(self.samples),
+            "gpuModel": usable[-1].get("gpuModel", "") if usable else "",
+            "runtime_vram_total_gib": total_values[-1] if total_values else None,
+            "peak_vram_gb": max(used_values) if used_values else None,
+            "avg_gpu_util": round(sum(util_values) / len(util_values), 3) if util_values else None,
+        }
+
+
+def is_oom_result(stdout: str, stderr: str) -> bool:
+    text = f"{stdout}\n{stderr}".lower()
+    return any(marker in text for marker in OOM_MARKERS)
+
+
+def received_wan22_parameters(payload: dict[str, Any]) -> dict:
+    return {key: payload[key] for key in WAN22_PARAMETER_FIELDS if key in payload}
+
+
+def resolve_wan22_parameters(payload: dict[str, Any]) -> dict:
+    received = received_wan22_parameters(payload)
+    prompt_resolution = resolve_character_prompts(str(payload.get("character_id", "")))
+    positive_prompt = prompt_resolution["positive_prompt"]
+    negative_prompt = prompt_resolution["negative_prompt"]
+    forwarded = {
+        "positive_prompt": positive_prompt,
+        "seed": int(payload.get("seed", 42)),
+        "steps": int(payload.get("steps", 4)),
+        "cfg": float(payload.get("cfg", 1.0)),
+        "shift": float(payload.get("shift", 4.0)),
+        "offload_model": True,
+        "convert_model_dtype": True,
+        "t5_cpu": True,
+        "task": "s2v-14B",
+    }
+    not_forwarded = {
+        "negative_prompt": {
+            "value": negative_prompt,
+            "reason": "Native Wan2.2 generate.py does not accept --negative_prompt.",
+            "source": "character_prompts.py",
+        }
+    }
+    unsupported = [
+        key
+        for key in UNSUPPORTED_NATIVE_WAN22_PARAMETER_FIELDS
+        if key in payload
+    ]
+    return {
+        "received_parameters": received,
+        "forwarded_parameters": forwarded,
+        "not_forwarded_parameters": not_forwarded,
+        "unsupported_parameters": unsupported,
+        "supported_parameter_fields": list(SUPPORTED_WAN22_PARAMETER_FIELDS),
+        "unsupported_parameter_fields": list(UNSUPPORTED_NATIVE_WAN22_PARAMETER_FIELDS),
+        "prompt_source": {
+            "module": "app.character_prompts",
+            "character_id": prompt_resolution["character_id"],
+        },
+    }
+
+
+def build_command(
+    image_path: Path,
+    audio_path: Path,
+    output_path: Path,
+    model_dir: Path,
+    width: int,
+    height: int,
+    forwarded_parameters: dict[str, Any],
+) -> list[str]:
+    t5_cpu_requested = bool(forwarded_parameters.get("t5_cpu", False))
+    command = [
+        "python",
+        "-m",
+        "app.wan22_s2v_generate_wrapper",
+        "--task",
+        str(forwarded_parameters["task"]),
+        "--size",
+        f"{width}*{height}",
+        "--ckpt_dir",
+        str(model_dir),
+        "--offload_model",
+        "True",
+        "--convert_model_dtype",
+    ]
+    if t5_cpu_requested:
+        command.append("--t5_cpu")
+    command.extend(
+        [
+        "--prompt",
+        str(forwarded_parameters["positive_prompt"]),
+        "--image",
+        str(image_path),
+        "--audio",
+        str(audio_path),
+        "--save_file",
+        str(output_path),
+        ]
+    )
+    command.extend(["--sample_steps", str(forwarded_parameters["steps"])])
+    command.extend(["--sample_shift", str(forwarded_parameters["shift"])])
+    command.extend(["--sample_guide_scale", str(forwarded_parameters["cfg"])])
+    command.extend(["--base_seed", str(forwarded_parameters["seed"])])
+    return command
+
+
+def t5_cpu_command_status(command: list[str], forwarded_parameters: dict[str, Any]) -> dict:
+    requested = bool(forwarded_parameters.get("t5_cpu", False))
+    forwarded = "--t5_cpu" in command
+    return {
+        "t5_cpu_requested": requested,
+        "t5_cpu_forwarded": forwarded,
+        "t5_cpu_effective": requested and forwarded,
+    }
+
+
+def alex_prompt_guard_status(character_id: Any, positive_prompt: str) -> dict:
+    normalized = str(character_id or "").strip().lower()
+    forbidden_terms = ("Maé", "French", "woman")
+    matched = [term for term in forbidden_terms if term in positive_prompt]
+    return {
+        "character_id": normalized,
+        "checked": normalized == "alex",
+        "forbidden_terms": list(forbidden_terms),
+        "matched_terms": matched if normalized == "alex" else [],
+        "passed": normalized != "alex" or not matched,
+    }
+
+
+def finalize_pre_inference_failure(report: dict, payload: dict[str, Any], local_report_path: Path, started: float, status: str, error_type: str, error_text: str) -> dict:
+    report["status"] = status
+    report["job_status"] = status
+    report["error_type"] = error_type
+    report["error_truncated"] = error_text[:1000]
+    report["inference_executed"] = False
+    report["runtime_seconds"] = round(time.monotonic() - started, 3)
+    write_json(local_report_path, report)
+    if r2_env_ready():
+        try:
+            upload_file(local_report_path, payload["output_report_key"])
+            report["report_uploaded_to_r2"] = True
+        except Exception as upload_exc:
+            report["report_upload_error_type"] = type(upload_exc).__name__
+            report["report_upload_error_truncated"] = str(upload_exc)[:1000]
+    return report
+
+
+def command_arg_value(command: list[str], name: str) -> str:
+    try:
+        index = command.index(name)
+    except ValueError:
+        return ""
+    if index + 1 >= len(command):
+        return ""
+    return command[index + 1]
+
+
+def read_json_if_exists(path: Path) -> dict:
+    if not path.exists():
+        return {
+            "patch_requested": os.getenv("AYL_SAFETENSORS_CUDA_TO_CPU_PATCH", "") == "1",
+            "patch_applied": False,
+            "patched_calls_count": 0,
+            "redirected_devices": [],
+            "status": "missing_patch_report",
+        }
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "patch_requested": os.getenv("AYL_SAFETENSORS_CUDA_TO_CPU_PATCH", "") == "1",
+            "patch_applied": False,
+            "patched_calls_count": 0,
+            "redirected_devices": [],
+            "status": "failed_read_patch_report",
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:500],
+        }
+
+
+def split_runtime_patch_report(path: Path) -> dict:
+    payload = read_json_if_exists(path)
+    if "safetensors_cuda_to_cpu_patch" in payload or "attention_sdpa_patch" in payload:
+        return {
+            "raw": payload,
+            "safetensors_cuda_to_cpu_patch": payload.get("safetensors_cuda_to_cpu_patch", {}),
+            "attention_sdpa_patch": payload.get("attention_sdpa_patch", {}),
+        }
+    return {
+        "raw": payload,
+        "safetensors_cuda_to_cpu_patch": payload,
+        "attention_sdpa_patch": {},
+    }
+
+
+def apply_attention_patch_summary(report: dict, patch_report: dict) -> None:
+    attention = patch_report if isinstance(patch_report, dict) else {}
+    report["attention_sdpa_patch"] = attention
+    report["attention_backend_used"] = attention.get("attention_backend_used")
+    report["attention_fallback_applied"] = attention.get("attention_fallback_applied")
+    report["attention_patch_status"] = attention.get("attention_patch_status")
+    report["attention_patch_calls_count"] = attention.get("attention_patch_calls_count")
+    report["attention_patched_modules"] = attention.get("patched_modules", [])
+
+
+def run_command(command: list[str], timeout_seconds: int) -> dict:
+    monitor = GpuMonitor()
+    started = time.monotonic()
+    save_file = command_arg_value(command, "--save_file")
+    patch_report_path = (
+        Path(save_file).with_name("safetensors_cuda_to_cpu_patch_report.json")
+        if save_file
+        else Path("/tmp/ayl_safetensors_cuda_to_cpu_patch_report.json")
+    )
+    monitor.start()
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            cwd="/opt/ayl-simplepod-wan22-s2v-fastapi-v2",
+            env={
+                **os.environ,
+                "PYTHONPATH": "/opt/Wan2.2:/opt/ayl-simplepod-wan22-s2v-fastapi-v2",
+                "AYL_SAFETENSORS_PATCH_REPORT_PATH": str(patch_report_path),
+            },
+        )
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        status = "succeeded" if completed.returncode == 0 else "oom" if is_oom_result(stdout, stderr) else "failed"
+        patch_report = split_runtime_patch_report(patch_report_path)
+        return {
+            "status": status,
+            "returncode": completed.returncode,
+            "runtime_seconds": round(time.monotonic() - started, 3),
+            "stdout_truncated": truncate_output(stdout),
+            "stderr_truncated": truncate_output(stderr),
+            "telemetry": monitor.summary(),
+            "runtime_patch_report": patch_report["raw"],
+            "safetensors_cuda_to_cpu_patch": patch_report["safetensors_cuda_to_cpu_patch"],
+            "attention_sdpa_patch": patch_report["attention_sdpa_patch"],
+        }
+    except subprocess.TimeoutExpired as exc:
+        stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+        stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+        patch_report = split_runtime_patch_report(patch_report_path)
+        return {
+            "status": "timeout",
+            "returncode": None,
+            "runtime_seconds": round(time.monotonic() - started, 3),
+            "stdout_truncated": truncate_output(stdout),
+            "stderr_truncated": truncate_output(stderr),
+            "telemetry": monitor.summary(),
+            "runtime_patch_report": patch_report["raw"],
+            "safetensors_cuda_to_cpu_patch": patch_report["safetensors_cuda_to_cpu_patch"],
+            "attention_sdpa_patch": patch_report["attention_sdpa_patch"],
+        }
+    finally:
+        monitor.stop()
+
+
+def file_facts(path: Path) -> dict:
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "size_bytes": path.stat().st_size if path.exists() and path.is_file() else None,
+    }
+
+
+def safe_head_object(key: str) -> dict:
+    try:
+        return head_object(key)
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "key": key,
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:500],
+        }
+
+
+def safe_upload_permission_check(job_id: str, output_report_key: str) -> dict:
+    if not r2_env_ready():
+        return {"status": "skipped_missing_r2_env"}
+    check_key = f"{output_report_key}.preflight_write_check_{job_id}.json"
+    body = json.dumps({"job_id": job_id, "purpose": "preflight_write_check"}).encode("utf-8")
+    resolved = resolved_r2_env()
+    try:
+        client = get_r2_client()
+        client.put_object(Bucket=resolved["bucket"], Key=check_key, Body=body, ContentType="application/json")
+        delete_status = "not_attempted"
+        try:
+            client.delete_object(Bucket=resolved["bucket"], Key=check_key)
+            delete_status = "succeeded"
+        except Exception:
+            delete_status = "failed_non_blocking"
+        return {"status": "succeeded", "key": check_key, "delete_status": delete_status}
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "key": check_key,
+            "error_type": type(exc).__name__,
+            "error_truncated": str(exc)[:500],
+        }
+
+
+def r2_preflight(payload: dict[str, Any]) -> dict:
+    env_status = "succeeded" if r2_env_ready() else "missing_env"
+    result = {
+        "r2_env_check_status": env_status,
+        "r2_env_present_redacted": r2_env_alias_presence(),
+        "r2_reference_head_status": safe_head_object(payload["reference_image_key"]) if env_status == "succeeded" else {"status": "skipped_missing_r2_env"},
+        "r2_audio_head_status": safe_head_object(payload["audio_key"]) if env_status == "succeeded" else {"status": "skipped_missing_r2_env"},
+        "r2_upload_permission_check_status": (
+            safe_upload_permission_check(str(payload["job_id"]), payload["output_report_key"])
+            if env_status == "succeeded"
+            else {"status": "skipped_missing_r2_env"}
+        ),
+    }
+    checks = (
+        result["r2_env_check_status"] == "succeeded",
+        result["r2_reference_head_status"].get("status") == "succeeded",
+        result["r2_audio_head_status"].get("status") == "succeeded",
+        result["r2_upload_permission_check_status"].get("status") == "succeeded",
+    )
+    result["status"] = "succeeded" if all(checks) else "failed"
+    return result
+
+
+def run_wan22_s2v_single_job(payload: dict[str, Any]) -> dict:
+    settings = get_settings()
+    job_id = str(payload["job_id"])
+    target_width = int(payload["target_width"])
+    target_height = int(payload["target_height"])
+    resolution = f"{target_width}x{target_height}"
+    work_dir = WORK_ROOT / job_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    input_image = work_dir / "reference.png"
+    input_audio = work_dir / "audio.wav"
+    output_primary = work_dir / f"{job_id}_{resolution}.mp4"
+    output_960 = work_dir / f"{job_id}_960x960.mp4"
+    local_report_path = work_dir / "final_report.json"
+
+    started = time.monotonic()
+    parameter_resolution = resolve_wan22_parameters(payload)
+    primary_command = build_command(
+        input_image,
+        input_audio,
+        output_primary,
+        settings.wan22_s2v_model_dir,
+        target_width,
+        target_height,
+        parameter_resolution["forwarded_parameters"],
+    )
+    t5_cpu_status = t5_cpu_command_status(primary_command, parameter_resolution["forwarded_parameters"])
+    prompt_guard_status = alex_prompt_guard_status(
+        payload.get("character_id", ""),
+        str(parameter_resolution["forwarded_parameters"]["positive_prompt"]),
+    )
+    report: dict[str, Any] = {
+        "job_id": job_id,
+        "job_status": "started",
+        "status": "started",
+        "width": target_width,
+        "height": target_height,
+        "resolution": resolution,
+        "requested_width": target_width,
+        "requested_height": target_height,
+        "requested_resolution": resolution,
+        "max_concurrent_jobs": payload.get("max_concurrent_jobs"),
+        "active_jobs_at_submission": payload.get("active_jobs_at_submission"),
+        "created_at": now_iso(),
+        "character_id": payload.get("character_id", ""),
+        "base_taught_language": payload.get("base_taught_language", ""),
+        "reference_image_key": payload["reference_image_key"],
+        "audio_key": payload["audio_key"],
+        "requested_resolution_detail": {"width": target_width, "height": target_height},
+        "actual_generation_resolution": None,
+        "output_width": None,
+        "output_height": None,
+        "output_resolution": None,
+        "fallback_resolution": {"width": 960, "height": 960},
+        "fallback_used": False,
+        "fallback_allowed": bool(payload.get("allow_oom_fallback", False)),
+        "fps": payload["fps"],
+        "target_duration_seconds": payload["target_duration_seconds"],
+        "output_video_key": payload["output_video_key"],
+        "output_report_key": payload["output_report_key"],
+        "r2_env_present_redacted": r2_env_alias_presence(),
+        "r2_client_configured": r2_env_ready(),
+        "model_dir": str(settings.wan22_s2v_model_dir),
+        "downloads_model_weights": False,
+        "placeholder_generated": False,
+        "video_generated": False,
+        "r2_upload_attempted": False,
+        "received_parameters": parameter_resolution["received_parameters"],
+        "forwarded_parameters": parameter_resolution["forwarded_parameters"],
+        "not_forwarded_parameters": parameter_resolution["not_forwarded_parameters"],
+        "unsupported_parameters": parameter_resolution["unsupported_parameters"],
+        "supported_parameter_fields": parameter_resolution["supported_parameter_fields"],
+        "unsupported_parameter_fields": parameter_resolution["unsupported_parameter_fields"],
+        "prompt_source": parameter_resolution["prompt_source"],
+        "command": primary_command,
+        "t5_cpu_requested": t5_cpu_status["t5_cpu_requested"],
+        "t5_cpu_forwarded": t5_cpu_status["t5_cpu_forwarded"],
+        "t5_cpu_effective": t5_cpu_status["t5_cpu_effective"],
+        "prompt_guard": prompt_guard_status,
+    }
+
+    try:
+        if t5_cpu_status["t5_cpu_requested"] and "--t5_cpu" not in primary_command:
+            return finalize_pre_inference_failure(
+                report,
+                payload,
+                local_report_path,
+                started,
+                "failed_missing_t5_cpu_flag",
+                "missing_t5_cpu_flag",
+                "t5_cpu_requested=true but the final generate.py command does not contain --t5_cpu.",
+            )
+
+        if not prompt_guard_status["passed"]:
+            return finalize_pre_inference_failure(
+                report,
+                payload,
+                local_report_path,
+                started,
+                "failed_character_prompt_guard",
+                "character_prompt_guard_failed",
+                (
+                    "character_id=alex resolved to a forbidden prompt containing: "
+                    + ", ".join(prompt_guard_status["matched_terms"])
+                ),
+            )
+
+        if parameter_resolution["unsupported_parameters"]:
+            return finalize_pre_inference_failure(
+                report,
+                payload,
+                local_report_path,
+                started,
+                "unsupported_wan22_parameter",
+                "unsupported_wan22_parameter",
+                (
+                    "Native Wan2.2 S2V runner does not currently support these payload fields: "
+                    + ", ".join(parameter_resolution["unsupported_parameters"])
+                ),
+            )
+
+        preflight = r2_preflight(payload)
+        report["r2_preflight"] = preflight
+        report["r2_env_check_status"] = preflight["r2_env_check_status"]
+        report["r2_reference_head_status"] = preflight["r2_reference_head_status"]
+        report["r2_audio_head_status"] = preflight["r2_audio_head_status"]
+        report["r2_upload_permission_check_status"] = preflight["r2_upload_permission_check_status"]
+        report["r2_upload_permission_check_status"] = preflight["r2_upload_permission_check_status"]
+        if preflight["status"] != "succeeded":
+            report["status"] = "failed_r2_preflight"
+            report["error_type"] = "r2_preflight_failed"
+            report["runtime_seconds"] = round(time.monotonic() - started, 3)
+            write_json(local_report_path, report)
+            return report
+
+        download_file(payload["reference_image_key"], input_image)
+        download_file(payload["audio_key"], input_audio)
+        report["input_files"] = {
+            "reference_image": file_facts(input_image),
+            "audio": file_facts(input_audio),
+        }
+
+        primary_result = run_command(primary_command, int(payload.get("timeout_seconds") or 7200))
+        report["primary_inference"] = primary_result
+        report["safetensors_cuda_to_cpu_patch"] = primary_result.get("safetensors_cuda_to_cpu_patch", {})
+        apply_attention_patch_summary(report, primary_result.get("attention_sdpa_patch", {}))
+        report.update(primary_result.get("telemetry", {}))
+
+        selected_output = output_primary
+        if primary_result["status"] == "succeeded" and output_primary.exists():
+            report["status"] = "succeeded"
+            report["job_status"] = "succeeded"
+            report["actual_generation_resolution"] = {"width": target_width, "height": target_height}
+            report["output_width"] = target_width
+            report["output_height"] = target_height
+            report["output_resolution"] = resolution
+        elif primary_result["status"] == "oom" and payload.get("allow_oom_fallback"):
+            fallback_command = build_command(
+                input_image,
+                input_audio,
+                output_960,
+                settings.wan22_s2v_model_dir,
+                960,
+                960,
+                parameter_resolution["forwarded_parameters"],
+            )
+            fallback_result = run_command(fallback_command, int(payload.get("timeout_seconds") or 7200))
+            report["fallback_inference"] = fallback_result
+            report["safetensors_cuda_to_cpu_patch"] = fallback_result.get(
+                "safetensors_cuda_to_cpu_patch",
+                report.get("safetensors_cuda_to_cpu_patch", {}),
+            )
+            apply_attention_patch_summary(
+                report,
+                fallback_result.get("attention_sdpa_patch", report.get("attention_sdpa_patch", {})),
+            )
+            report["fallback_command"] = fallback_command
+            selected_output = output_960
+            report["fallback_used"] = fallback_result["status"] == "succeeded" and output_960.exists()
+            if report["fallback_used"]:
+                report["status"] = "succeeded_with_960_fallback"
+                report["job_status"] = "succeeded"
+                report["actual_generation_resolution"] = {"width": 960, "height": 960}
+                report["output_width"] = 960
+                report["output_height"] = 960
+                report["output_resolution"] = "960x960"
+                report.update(fallback_result.get("telemetry", {}))
+            else:
+                report["status"] = "failed_oom_fallback_failed"
+                report["job_status"] = "failed"
+        elif primary_result["status"] == "oom":
+            report["status"] = "failed_oom_1080_no_fallback"
+            report["job_status"] = "failed"
+            report["error_type"] = "cuda_oom"
+        else:
+            report["status"] = "failed_inference"
+            report["job_status"] = "failed"
+            report["error_type"] = primary_result["status"]
+
+        if report["status"] in {"succeeded", "succeeded_with_960_fallback"} and selected_output.exists():
+            upload_file(selected_output, payload["output_video_key"])
+            report["video_generated"] = True
+            report["r2_upload_attempted"] = True
+            report["output_file"] = file_facts(selected_output)
+        report["runtime_seconds"] = round(time.monotonic() - started, 3)
+        report["estimated_cost"] = None
+        write_json(local_report_path, report)
+        upload_file(local_report_path, payload["output_report_key"])
+        report["report_uploaded_to_r2"] = True
+        return report
+    except Exception as exc:
+        report["status"] = "failed_exception"
+        report["error_type"] = type(exc).__name__
+        report["error_truncated"] = str(exc)[:1000]
+        report["runtime_seconds"] = round(time.monotonic() - started, 3)
+        write_json(local_report_path, report)
+        if r2_env_ready():
+            try:
+                upload_file(local_report_path, payload["output_report_key"])
+                report["report_uploaded_to_r2"] = True
+            except Exception as upload_exc:
+                report["report_upload_error_type"] = type(upload_exc).__name__
+                report["report_upload_error_truncated"] = str(upload_exc)[:1000]
+        return report
