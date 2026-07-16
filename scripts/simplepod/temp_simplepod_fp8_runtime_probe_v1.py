@@ -610,10 +610,11 @@ def classify_startup(detail_json) -> dict:
     text_lower = text.lower()
     image_pull_detected = marker_seen(text, STARTUP_PULL_MARKERS) or any(token in status_lower for token in CREATED_OR_PULLING_STATUSES)
     image_pull_completed = marker_seen(text, ("Image pulled",))
+    probe_output_detected = "[TEMP_FP8_RUNTIME_PROBE_V1]" in text or "runtime_certification" in text_lower
     container_start_detected = (
         marker_seen(text, STARTUP_READY_MARKERS)
         or any(token in status_lower for token in RUNNING_STATUSES)
-        or any(marker in text for marker in REPORT_MARKERS)
+        or probe_output_detected
     )
     image_pull_failed = marker_seen(text, IMAGE_PULL_ERROR_MARKERS) or any(marker.lower() in text_lower for marker in IMAGE_PULL_ERROR_MARKERS)
     terminal_seen = terminal_state_seen(detail_json)
@@ -625,6 +626,7 @@ def classify_startup(detail_json) -> dict:
         "container_exit_code": extract_exit_code(status_fields),
         "image_pull_detected": image_pull_detected,
         "image_pull_completed": image_pull_completed,
+        "probe_output_detected": probe_output_detected,
         "container_start_detected": container_start_detected,
         "image_pull_failed": image_pull_failed,
         "terminal_state_seen": terminal_seen,
@@ -1038,19 +1040,19 @@ def wait_for_container_start(base_url: str, api_key: str, instance_id: int, time
                 "latest_classification": latest_classification,
                 "status_history": status_history,
             }
-        if classification.get("container_start_detected"):
-            return {
-                "status": "container_started",
-                "startup_seconds": round(time.monotonic() - started_monotonic, 3),
-                "latest_detail_json": latest_detail_json,
-                "latest_classification": latest_classification,
-                "status_history": status_history,
-            }
         if classification.get("terminal_state_seen"):
             return {
                 "status": "container_terminal_before_probe_monitor",
                 "startup_seconds": round(time.monotonic() - started_monotonic, 3),
                 "terminal_state_seconds": round(time.monotonic() - started_monotonic, 3),
+                "latest_detail_json": latest_detail_json,
+                "latest_classification": latest_classification,
+                "status_history": status_history,
+            }
+        if classification.get("container_start_detected"):
+            return {
+                "status": "container_started",
+                "startup_seconds": round(time.monotonic() - started_monotonic, 3),
                 "latest_detail_json": latest_detail_json,
                 "latest_classification": latest_classification,
                 "status_history": status_history,
@@ -1136,6 +1138,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--probe-timeout-seconds", type=int, default=300)
     parser.add_argument("--poll-interval-seconds", type=int, default=10)
     parser.add_argument("--instance-market", default="", help="Optional explicit /instances/market/{id}; normally auto-selected.")
+    parser.add_argument("--run-mock-tests", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.ready_timeout_seconds is not None:
         args.startup_timeout_seconds = args.ready_timeout_seconds
@@ -1156,8 +1159,144 @@ def validate_args(args: argparse.Namespace) -> tuple[bool, str]:
     return True, "execute_confirmed"
 
 
+def b64_text(text: str) -> str:
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def make_mock_instance(status_value: str, console_text: str = "", **extra) -> dict:
+    payload = {
+        "id": 123,
+        "status": status_value,
+        "containerStatus": status_value,
+        "console": b64_text(console_text) if console_text else "",
+        "consoleSystem": b64_text(console_text) if console_text else "",
+    }
+    payload.update(extra)
+    return payload
+
+
+def run_mock_tests() -> int:
+    original_http_request = smoke.http_request
+    original_sleep = time.sleep
+    original_http_text_request = globals()["http_text_request"]
+    try:
+        time.sleep = lambda _seconds: None
+
+        created = make_mock_instance("created", "[mock] Preparing instance...\n")
+        created_again = make_mock_instance("created", "[mock] Preparing instance...\n")
+        pulling = make_mock_instance("created", "[mock] Pulling image...\n")
+        running = make_mock_instance("running", "[mock] Running\n")
+        sequence = [created, created_again, pulling, running]
+        calls = {"count": 0}
+
+        def fake_startup_http_request(_base_url, _path, _api_key="", **_kwargs):
+            index = min(calls["count"], len(sequence) - 1)
+            calls["count"] += 1
+            return {
+                "attempted": True,
+                "status": "succeeded",
+                "method": "GET",
+                "path": _path,
+                "http_status_code": 200,
+                "json": sequence[index],
+            }
+
+        smoke.http_request = fake_startup_http_request
+        startup_result = wait_for_container_start("https://mock.simplepod.local", "token", 123, 30, 0)
+        assert startup_result["status"] == "container_started", startup_result
+        assert calls["count"] == 4, startup_result
+        assert startup_result["status_history"][0]["container_status"] == "created", startup_result
+        assert startup_result["status_history"][2]["image_pull_detected"] is True, startup_result
+        assert startup_result["latest_classification"]["container_start_detected"] is True, startup_result
+
+        probe_sequence = [
+            make_mock_instance(
+                "running",
+                "[TEMP_FP8_RUNTIME_PROBE_V1] status=succeeded runtime_certification=PASS\n",
+                report={"runtime_certification": "PASS"},
+            )
+        ]
+
+        def fake_probe_http_request(_base_url, _path, _api_key="", **_kwargs):
+            return {
+                "attempted": True,
+                "status": "succeeded",
+                "method": "GET",
+                "path": _path,
+                "http_status_code": 200,
+                "json": probe_sequence[0],
+            }
+
+        smoke.http_request = fake_probe_http_request
+        probe_result = monitor_probe("https://mock.simplepod.local", "token", 123, 30, 0)
+        assert probe_result["status"] == "report_found", probe_result
+        assert probe_result["report_found"] is True, probe_result
+
+        deleted_sequence = [
+            make_mock_instance("created", "[mock] Preparing instance...\n"),
+            make_mock_instance("deleted", "[mock] Failed to load /usr/local/lib/python3.10/dist-packages/torchao/_C_cutlass_90a.abi3.so\n"),
+        ]
+        deleted_calls = {"count": 0}
+
+        def fake_deleted_http_request(_base_url, _path, _api_key="", **_kwargs):
+            index = min(deleted_calls["count"], len(deleted_sequence) - 1)
+            deleted_calls["count"] += 1
+            return {
+                "attempted": True,
+                "status": "succeeded",
+                "method": "GET",
+                "path": _path,
+                "http_status_code": 200,
+                "json": deleted_sequence[index],
+            }
+
+        def fake_text_request(_base_url, path, _api_key, timeout_seconds=30):
+            return {
+                "attempted": True,
+                "status": "failed",
+                "method": "GET",
+                "path": path,
+                "http_status_code": 404,
+                "body_text": "",
+                "body_truncated": "",
+            }
+
+        smoke.http_request = fake_deleted_http_request
+        globals()["http_text_request"] = fake_text_request
+        deleted_result = wait_for_container_start("https://mock.simplepod.local", "token", 123, 30, 0)
+        assert deleted_result["status"] == "container_terminal_before_probe_monitor", deleted_result
+        assert deleted_result["latest_classification"]["terminal_state_seen"] is True, deleted_result
+        log_collection = collect_container_logs("https://mock.simplepod.local", "token", 123, deleted_result["latest_detail_json"])
+        assert log_collection["container_logs_retrieved"] is True, log_collection
+        assert log_collection["torchao_extension_load_errors"], log_collection
+        assert "_C_cutlass_90a" in log_collection["container_logs_truncated"], log_collection
+
+        idempotent_delete_result = safe_result(
+            {
+                "attempted": True,
+                "status": "failed",
+                "method": "DELETE",
+                "path": "/instances/123",
+                "http_status_code": 404,
+                "error_type": "HTTPError",
+                "error_truncated": "HTTP Error 404: Not Found",
+            }
+        )
+        assert idempotent_delete_result["http_status_code"] == 404, idempotent_delete_result
+
+        print(f"[{SCRIPT_ID}] mock_tests=passed", flush=True)
+        return 0
+    finally:
+        smoke.http_request = original_http_request
+        time.sleep = original_sleep
+        globals()["http_text_request"] = original_http_text_request
+
+
 def main() -> int:
     args = parse_args()
+    if args.run_mock_tests:
+        return run_mock_tests()
+
     started_monotonic = time.monotonic()
     timer = PhaseTimer(emit=True)
     data: dict = {"phase_timings": timer.phases}
@@ -1165,6 +1304,16 @@ def main() -> int:
     status = "unknown"
     api_key = ""
     base_url = smoke.DEFAULT_BASE_URL
+    startup_status = "not_started"
+    startup_completed = False
+    container_terminal_state_detected = False
+    terminal_state = None
+    terminal_state_seconds = None
+    latest_detail_json = None
+    latest_classification = {}
+    startup_result = {}
+    monitor_result = {}
+    log_collection = {}
 
     print(f"[{SCRIPT_ID}] START dry_run={str(not args.execute).lower()} template_id={args.template_id}", flush=True)
     print(f"[{SCRIPT_ID}] image_ref={IMAGE_REF}", flush=True)
@@ -1276,6 +1425,11 @@ def main() -> int:
         }
         latest_detail_json = startup_result.get("latest_detail_json")
         latest_classification = startup_result.get("latest_classification") or {}
+        startup_status = startup_result.get("status") or "unknown"
+        startup_completed = startup_status == "container_started"
+        container_terminal_state_detected = startup_status == "container_terminal_before_probe_monitor"
+        terminal_state = latest_classification.get("status_value") or None
+        terminal_state_seconds = startup_result.get("terminal_state_seconds")
         startup_text_fields = latest_classification.get("text_fields") or []
         data["startup_seconds"] = startup_result.get("startup_seconds")
         data["image_pull_detected"] = bool(latest_classification.get("image_pull_detected"))
@@ -1285,11 +1439,10 @@ def main() -> int:
         data["decoded_console_system"] = decoded_field_by_name(startup_text_fields, "consoleSystem")
         data["final_decoded_console"] = latest_classification.get("console_text") or ""
         data["status_history"] = startup_result.get("status_history", [])[-80:]
-        data["container_terminal_state_detected"] = startup_status == "container_terminal_before_probe_monitor"
-        data["terminal_state"] = latest_classification.get("status_value") or ""
-        data["terminal_state_seconds"] = startup_result.get("terminal_state_seconds")
-
-        startup_status = startup_result.get("status")
+        data["container_terminal_state_detected"] = container_terminal_state_detected
+        data["terminal_state"] = terminal_state or ""
+        data["terminal_state_seconds"] = terminal_state_seconds
+        data["startup_completed"] = startup_completed
         if startup_status in {"failed_image_pull", "blocked_image_pull_timeout", "blocked_startup_timeout"}:
             status = startup_status
             data["original_status"] = startup_status
