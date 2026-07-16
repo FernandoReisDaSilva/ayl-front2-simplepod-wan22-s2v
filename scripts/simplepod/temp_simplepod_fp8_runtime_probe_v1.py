@@ -1,4 +1,6 @@
 import argparse
+import base64
+import binascii
 import json
 import os
 import sys
@@ -107,6 +109,41 @@ ERROR_MARKERS = (
     "Float8WeightOnlyConfig",
 )
 
+STARTUP_PULL_MARKERS = (
+    "Download starting",
+    "Preparing instance",
+    "Pulling image",
+)
+
+STARTUP_READY_MARKERS = (
+    "Image pulled",
+    "Starting container",
+    "Container started",
+    "Running",
+    "Ready",
+    "[TEMP_FP8_RUNTIME_PROBE_V1]",
+)
+
+IMAGE_PULL_ERROR_MARKERS = (
+    "Error pulling image",
+    "manifest unknown",
+    "unauthorized",
+)
+
+CREATED_OR_PULLING_STATUSES = (
+    "created",
+    "preparing",
+    "pulling",
+    "provisioning",
+)
+
+RUNNING_STATUSES = (
+    "running",
+    "active",
+    "ready",
+    "started",
+)
+
 
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,6 +160,43 @@ def truncate(value, limit: int = 2000):
         return None
     text = str(value)
     return text if len(text) <= limit else text[:limit] + "...<truncated>"
+
+
+def printable_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    printable = sum(1 for char in text if char.isprintable() or char in "\r\n\t")
+    return printable / len(text)
+
+
+def maybe_decode_base64_text(value: str) -> tuple[str, bool]:
+    stripped = value.strip()
+    if not stripped or len(stripped) < 16:
+        return value, False
+    allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r"
+    if any(char not in allowed for char in stripped):
+        return value, False
+    compact = "".join(stripped.split())
+    if len(compact) % 4:
+        compact += "=" * (4 - (len(compact) % 4))
+    try:
+        decoded_bytes = base64.b64decode(compact, validate=False)
+    except (binascii.Error, ValueError):
+        return value, False
+    if not decoded_bytes:
+        return value, False
+    decoded = decoded_bytes.decode("utf-8", errors="replace")
+    if printable_ratio(decoded) < 0.85:
+        return value, False
+    decoded_lower = decoded.lower()
+    if not any(token in decoded_lower for token in ("instance", "image", "container", "pull", "ready", "error", "torch", "fp8", "probe", "runtime", "cuda")):
+        return value, False
+    return decoded, True
+
+
+def display_log_text(value: str) -> tuple[str, bool]:
+    decoded, was_base64 = maybe_decode_base64_text(value)
+    return decoded, was_base64
 
 
 def endpoint_host(url: str) -> str:
@@ -419,7 +493,8 @@ def collect_instance_text_fields(value, *, path: str = "", max_depth: int = 10, 
             item_path = path_join(path, key)
             key_lower = str(key).lower()
             if isinstance(item, str):
-                item_has_marker = any(marker in item for marker in REPORT_MARKERS + ERROR_MARKERS)
+                decoded_text, decoded_from_base64 = display_log_text(item)
+                item_has_marker = any(marker in decoded_text for marker in REPORT_MARKERS + ERROR_MARKERS)
                 key_is_loglike = any(token in key_lower for token in LOG_FIELD_KEYWORDS)
                 if key_is_loglike or item_has_marker:
                     found.append(
@@ -427,9 +502,12 @@ def collect_instance_text_fields(value, *, path: str = "", max_depth: int = 10, 
                             "path": item_path,
                             "key": str(key),
                             "length": len(item),
-                            "contains_fp8_marker": any(marker in item for marker in REPORT_MARKERS),
-                            "contains_error_marker": any(marker in item for marker in ERROR_MARKERS),
-                            "text_truncated": truncate(item, 8000),
+                            "decoded_from_base64": decoded_from_base64,
+                            "decoded_length": len(decoded_text),
+                            "contains_fp8_marker": any(marker in decoded_text for marker in REPORT_MARKERS),
+                            "contains_error_marker": any(marker in decoded_text for marker in ERROR_MARKERS),
+                            "raw_truncated": truncate(item, 1000),
+                            "text_truncated": truncate(decoded_text, 8000),
                         }
                     )
                     if len(found) >= max_items:
@@ -501,6 +579,58 @@ def extract_status_value(status_fields: list[dict]) -> str:
 def terminal_state_seen(detail_json) -> bool:
     text = json.dumps(safe_instance_observation(detail_json), ensure_ascii=False).lower()
     return any(marker in text for marker in TERMINAL_STATE_MARKERS)
+
+
+def combined_instance_text(detail_json) -> str:
+    fields = collect_instance_text_fields(detail_json)
+    return "\n".join(str(field.get("text_truncated") or "") for field in fields)
+
+
+def marker_seen(text: str, markers: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    return any(marker.lower() in lowered for marker in markers)
+
+
+def classify_startup(detail_json) -> dict:
+    status_fields = collect_instance_status_fields(detail_json)
+    text = combined_instance_text(detail_json)
+    status_value = extract_status_value(status_fields)
+    status_lower = status_value.lower()
+    text_lower = text.lower()
+    image_pull_detected = marker_seen(text, STARTUP_PULL_MARKERS) or any(token in status_lower for token in CREATED_OR_PULLING_STATUSES)
+    image_pull_completed = marker_seen(text, ("Image pulled",))
+    container_start_detected = (
+        marker_seen(text, STARTUP_READY_MARKERS)
+        or any(token in status_lower for token in RUNNING_STATUSES)
+        or any(marker in text for marker in REPORT_MARKERS)
+    )
+    image_pull_failed = marker_seen(text, IMAGE_PULL_ERROR_MARKERS) or any(marker.lower() in text_lower for marker in IMAGE_PULL_ERROR_MARKERS)
+    terminal_seen = terminal_state_seen(detail_json)
+    return {
+        "status_fields": status_fields,
+        "text_fields": collect_instance_text_fields(detail_json),
+        "console_text": text,
+        "status_value": status_value,
+        "container_exit_code": extract_exit_code(status_fields),
+        "image_pull_detected": image_pull_detected,
+        "image_pull_completed": image_pull_completed,
+        "container_start_detected": container_start_detected,
+        "image_pull_failed": image_pull_failed,
+        "terminal_state_seen": terminal_seen,
+    }
+
+
+def startup_progress_line(classification: dict) -> str:
+    text = classification.get("console_text") or ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    interesting = []
+    for line in lines:
+        if marker_seen(line, STARTUP_PULL_MARKERS + STARTUP_READY_MARKERS + IMAGE_PULL_ERROR_MARKERS):
+            interesting.append(line)
+    if interesting:
+        return interesting[-1]
+    status_value = classification.get("status_value") or ""
+    return f"container_status={status_value}" if status_value else "container_status=unknown"
 
 
 def maybe_json_from_string(value: str):
@@ -701,6 +831,14 @@ def collect_container_logs(base_url: str, api_key: str, instance_id: int, latest
     }
 
 
+def decoded_field_by_name(text_fields: list[dict], name: str) -> str:
+    target = name.lower()
+    for field in text_fields:
+        if str(field.get("key") or "").lower() == target:
+            return str(field.get("text_truncated") or "")
+    return ""
+
+
 def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
     fp8_report = data.get("fp8_runtime_report")
     fp8_summary = summarize_fp8_report(fp8_report)
@@ -735,6 +873,16 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
         "start_result": data.get("start_result"),
         "monitoring": data.get("monitoring"),
         "fp8_report_retrieval": data.get("fp8_report_retrieval"),
+        "startup_seconds": data.get("startup_seconds"),
+        "probe_seconds": data.get("probe_seconds"),
+        "image_pull_detected": data.get("image_pull_detected", False),
+        "image_pull_completed": data.get("image_pull_completed", False),
+        "container_start_detected": data.get("container_start_detected", False),
+        "decoded_console": data.get("decoded_console", ""),
+        "decoded_console_system": data.get("decoded_console_system", ""),
+        "startup_timeout_seconds": args.startup_timeout_seconds,
+        "probe_timeout_seconds": args.probe_timeout_seconds,
+        "status_history": data.get("status_history", []),
         "container_logs_attempted": data.get("container_logs_attempted", False),
         "container_logs_retrieved": data.get("container_logs_retrieved", False),
         "container_logs_source": data.get("container_logs_source", ""),
@@ -807,7 +955,79 @@ def wait_for_instance_observable(base_url: str, api_key: str, instance_id: int, 
     return "timeout", observations
 
 
+def wait_for_container_start(base_url: str, api_key: str, instance_id: int, timeout_seconds: int, poll_interval_seconds: int) -> dict:
+    started_monotonic = time.monotonic()
+    deadline = started_monotonic + max(1, timeout_seconds)
+    detail_path = smoke.INSTANCE_DETAIL_PATH.format(id=instance_id)
+    status_history = []
+    latest_detail_json = None
+    latest_classification = {}
+    last_progress_line = ""
+    polls = 0
+
+    while time.monotonic() < deadline:
+        polls += 1
+        detail_result = smoke.http_request(base_url, detail_path, api_key, timeout_seconds=30)
+        latest_detail_json = detail_result.get("json")
+        classification = classify_startup(latest_detail_json)
+        latest_classification = classification
+        progress_line = startup_progress_line(classification)
+        if progress_line != last_progress_line:
+            print(f"[{SCRIPT_ID}] startup {progress_line}", flush=True)
+            last_progress_line = progress_line
+        status_history.append(
+            {
+                "observed_at": now_iso(),
+                "poll": polls,
+                "request": safe_result(detail_result),
+                "container_status": classification.get("status_value"),
+                "container_exit_code": classification.get("container_exit_code"),
+                "image_pull_detected": classification.get("image_pull_detected"),
+                "image_pull_completed": classification.get("image_pull_completed"),
+                "container_start_detected": classification.get("container_start_detected"),
+                "image_pull_failed": classification.get("image_pull_failed"),
+                "terminal_state_seen": classification.get("terminal_state_seen"),
+                "progress_line": truncate(progress_line, 1000),
+            }
+        )
+        if classification.get("image_pull_failed"):
+            return {
+                "status": "failed_image_pull",
+                "startup_seconds": round(time.monotonic() - started_monotonic, 3),
+                "latest_detail_json": latest_detail_json,
+                "latest_classification": latest_classification,
+                "status_history": status_history,
+            }
+        if classification.get("container_start_detected"):
+            return {
+                "status": "container_started",
+                "startup_seconds": round(time.monotonic() - started_monotonic, 3),
+                "latest_detail_json": latest_detail_json,
+                "latest_classification": latest_classification,
+                "status_history": status_history,
+            }
+        if classification.get("terminal_state_seen"):
+            return {
+                "status": "container_terminal_before_probe_monitor",
+                "startup_seconds": round(time.monotonic() - started_monotonic, 3),
+                "latest_detail_json": latest_detail_json,
+                "latest_classification": latest_classification,
+                "status_history": status_history,
+            }
+        time.sleep(max(1, poll_interval_seconds))
+
+    timeout_status = "blocked_image_pull_timeout" if latest_classification.get("image_pull_detected") else "blocked_startup_timeout"
+    return {
+        "status": timeout_status,
+        "startup_seconds": round(time.monotonic() - started_monotonic, 3),
+        "latest_detail_json": latest_detail_json,
+        "latest_classification": latest_classification,
+        "status_history": status_history,
+    }
+
+
 def monitor_probe(base_url: str, api_key: str, instance_id: int, timeout_seconds: int, poll_interval_seconds: int) -> dict:
+    started_monotonic = time.monotonic()
     deadline = time.monotonic() + max(1, timeout_seconds)
     detail_path = smoke.INSTANCE_DETAIL_PATH.format(id=instance_id)
     observations = []
@@ -859,6 +1079,7 @@ def monitor_probe(base_url: str, api_key: str, instance_id: int, timeout_seconds
         "latest_status_fields": latest_status_fields,
         "container_exit_code": extract_exit_code(latest_status_fields),
         "container_status": extract_status_value(latest_status_fields),
+        "probe_seconds": round(time.monotonic() - started_monotonic, 3),
     }
 
 
@@ -868,11 +1089,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--confirm-start", action="store_true", help="Required with --execute.")
     parser.add_argument("--confirm-delete", action="store_true", help="Required with --execute; deletes instance in finally.")
     parser.add_argument("--template-id", type=int, required=True, help="Experimental SimplePod template id. Do not use BF16 template 25138.")
-    parser.add_argument("--ready-timeout-seconds", type=int, default=600)
+    parser.add_argument("--startup-timeout-seconds", type=int, default=1200)
+    parser.add_argument("--ready-timeout-seconds", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--probe-timeout-seconds", type=int, default=300)
     parser.add_argument("--poll-interval-seconds", type=int, default=10)
     parser.add_argument("--instance-market", default="", help="Optional explicit /instances/market/{id}; normally auto-selected.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.ready_timeout_seconds is not None:
+        args.startup_timeout_seconds = args.ready_timeout_seconds
+    return args
 
 
 def validate_args(args: argparse.Namespace) -> tuple[bool, str]:
@@ -992,27 +1217,93 @@ def main() -> int:
             print(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}", flush=True)
             return 1
 
-        with timer.phase("wait_instance_observable"):
-            observable_status, ready_observations = wait_for_instance_observable(
+        with timer.phase("wait_container_startup"):
+            startup_result = wait_for_container_start(
                 base_url,
                 api_key,
                 instance_id,
-                args.ready_timeout_seconds,
+                args.startup_timeout_seconds,
                 args.poll_interval_seconds,
             )
         data["monitoring"] = {
-            "ready_status": observable_status,
-            "ready_observations": ready_observations[-10:],
+            "startup": {
+                key: value
+                for key, value in startup_result.items()
+                if key not in {"latest_detail_json", "latest_classification"}
+            },
         }
+        latest_detail_json = startup_result.get("latest_detail_json")
+        latest_classification = startup_result.get("latest_classification") or {}
+        startup_text_fields = latest_classification.get("text_fields") or []
+        data["startup_seconds"] = startup_result.get("startup_seconds")
+        data["image_pull_detected"] = bool(latest_classification.get("image_pull_detected"))
+        data["image_pull_completed"] = bool(latest_classification.get("image_pull_completed"))
+        data["container_start_detected"] = bool(latest_classification.get("container_start_detected"))
+        data["decoded_console"] = decoded_field_by_name(startup_text_fields, "console")
+        data["decoded_console_system"] = decoded_field_by_name(startup_text_fields, "consoleSystem")
+        data["status_history"] = startup_result.get("status_history", [])[-80:]
 
-        with timer.phase("monitor_probe_report"):
-            monitor_result = monitor_probe(
-                base_url,
-                api_key,
-                instance_id,
-                args.probe_timeout_seconds,
-                args.poll_interval_seconds,
+        startup_status = startup_result.get("status")
+        if startup_status in {"failed_image_pull", "blocked_image_pull_timeout", "blocked_startup_timeout"}:
+            status = startup_status
+            data["original_status"] = startup_status
+            latest_status_fields = latest_classification.get("status_fields") or []
+            data["container_exit_code"] = latest_classification.get("container_exit_code")
+            data["container_status"] = latest_classification.get("status_value") or ""
+            data["container_exit_detected"] = data["container_exit_code"] is not None or latest_classification.get("terminal_state_seen") is True
+            data["instance_errors"] = [
+                field for field in latest_status_fields if "error" in str(field.get("path") or field.get("key") or "").lower()
+            ][:20]
+            data["instance_warnings"] = [
+                field for field in latest_status_fields if "warning" in str(field.get("path") or field.get("key") or "").lower()
+            ][:20]
+            with timer.phase("collect_container_logs"):
+                log_collection = collect_container_logs(base_url, api_key, instance_id, latest_detail_json)
+            for key, value in log_collection.items():
+                if key not in {"container_log_endpoint_attempts", "instance_text_fields"}:
+                    data[key] = value
+            data["fp8_report_retrieval"].update(
+                {
+                    "container_log_endpoint_attempts": log_collection.get("container_log_endpoint_attempts", []),
+                    "instance_text_fields": log_collection.get("instance_text_fields", []),
+                    "container_logs_attempted": log_collection.get("container_logs_attempted", False),
+                    "container_logs_retrieved": log_collection.get("container_logs_retrieved", False),
+                }
             )
+            log_certification = str(log_collection.get("runtime_certification_value") or "").upper()
+            if log_certification == "PASS":
+                status = "succeeded_recovered_from_container_logs"
+            elif log_certification == "FAIL":
+                status = "failed_recovered_from_container_logs"
+            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
+            write_json(REPORT_PATH, build_report(args, status, data))
+            print(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}", flush=True)
+            return 0 if status == "succeeded_recovered_from_container_logs" else 1
+
+        if startup_status == "container_terminal_before_probe_monitor":
+            monitor_result = {
+                "status": "terminal_state_seen_without_report",
+                "polls": 0,
+                "observations": [],
+                "report_found": find_fp8_report(latest_detail_json) is not None,
+                "terminal_state_seen": True,
+                "report_retrieval_note": "Container reached a terminal state during startup monitoring; collecting logs immediately.",
+                "fp8_runtime_report": find_fp8_report(latest_detail_json),
+                "latest_detail_json": latest_detail_json,
+                "latest_status_fields": latest_classification.get("status_fields") or [],
+                "container_exit_code": latest_classification.get("container_exit_code"),
+                "container_status": latest_classification.get("status_value") or "",
+                "probe_seconds": 0.0,
+            }
+        else:
+            with timer.phase("monitor_probe_report"):
+                monitor_result = monitor_probe(
+                    base_url,
+                    api_key,
+                    instance_id,
+                    args.probe_timeout_seconds,
+                    args.poll_interval_seconds,
+                )
         data["monitoring"]["probe"] = {
             key: value
             for key, value in monitor_result.items()
@@ -1041,6 +1332,7 @@ def main() -> int:
 
         latest_detail_json = monitor_result.get("latest_detail_json")
         latest_status_fields = monitor_result.get("latest_status_fields") or []
+        data["probe_seconds"] = monitor_result.get("probe_seconds")
         data["container_exit_code"] = monitor_result.get("container_exit_code")
         data["container_status"] = monitor_result.get("container_status") or ""
         data["container_exit_detected"] = data["container_exit_code"] is not None or monitor_result.get("terminal_state_seen") is True
@@ -1070,7 +1362,11 @@ def main() -> int:
             status = "succeeded_recovered_from_container_logs"
         elif certification != "PASS" and log_certification == "FAIL":
             status = "failed_recovered_from_container_logs"
-        elif not monitor_result.get("report_found") and not log_collection.get("container_logs_retrieved"):
+        elif (
+            status != "probe_timeout_no_report"
+            and not monitor_result.get("report_found")
+            and not log_collection.get("container_logs_retrieved")
+        ):
             status = "blocked_container_logs_not_exposed_by_simplepod_api"
         data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
         write_json(REPORT_PATH, build_report(args, status, data))
