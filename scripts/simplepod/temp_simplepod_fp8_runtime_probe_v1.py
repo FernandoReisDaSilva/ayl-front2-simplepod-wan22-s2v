@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_fp8_runtime_probe_v1.json"
 CONTAINER_LOG_PATH = REPO_ROOT / "logs" / "simplepod_fp8_runtime_probe_container.log"
 
-IMAGE_TAG = "0.3.00-blackwell-fp8-runtime-probe-v1"
+IMAGE_TAG = "0.3.01-blackwell-fp8-runtime-probe-v2"
 IMAGE_REF = f"ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:{IMAGE_TAG}"
 DATACENTER = "EU-PL-01"
 MIN_GPU_MEMORY_MB = 48_000
@@ -83,6 +83,7 @@ TERMINAL_STATE_MARKERS = (
     "finished",
     "stopped",
     "terminated",
+    "deleted",
     "succeeded",
     "success",
     "error",
@@ -104,6 +105,9 @@ ERROR_MARKERS = (
     "ModuleNotFoundError",
     "ImportError",
     "RuntimeError",
+    "Failed to load",
+    "_C_cutlass_90a",
+    "_C_mxfp8",
     "CUDA",
     "torchao",
     "Float8WeightOnlyConfig",
@@ -171,7 +175,7 @@ def printable_ratio(text: str) -> float:
 
 def maybe_decode_base64_text(value: str) -> tuple[str, bool]:
     stripped = value.strip()
-    if not stripped or len(stripped) < 16:
+    if not stripped or len(stripped) < 4:
         return value, False
     allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r"
     if any(char not in allowed for char in stripped):
@@ -189,6 +193,8 @@ def maybe_decode_base64_text(value: str) -> tuple[str, bool]:
     if printable_ratio(decoded) < 0.85:
         return value, False
     decoded_lower = decoded.lower()
+    if len(compact) <= 12:
+        return decoded, True
     if not any(token in decoded_lower for token in ("instance", "image", "container", "pull", "ready", "error", "torch", "fp8", "probe", "runtime", "cuda")):
         return value, False
     return decoded, True
@@ -577,7 +583,12 @@ def extract_status_value(status_fields: list[dict]) -> str:
 
 
 def terminal_state_seen(detail_json) -> bool:
-    text = json.dumps(safe_instance_observation(detail_json), ensure_ascii=False).lower()
+    status_fields = collect_instance_status_fields(detail_json)
+    text = (
+        json.dumps(safe_instance_observation(detail_json), ensure_ascii=False)
+        + "\n"
+        + json.dumps(status_fields, ensure_ascii=False)
+    ).lower()
     return any(marker in text for marker in TERMINAL_STATE_MARKERS)
 
 
@@ -742,6 +753,26 @@ def parse_runtime_certification_from_text(text: str) -> str:
 
 def analyze_container_log_text(text: str) -> dict:
     markers_found = [marker for marker in REPORT_MARKERS + ERROR_MARKERS if marker in text]
+    failure_markers = [
+        marker
+        for marker in (
+            "Failed to load",
+            "_C_cutlass_90a",
+            "_C_mxfp8",
+            "Traceback",
+            "ModuleNotFoundError",
+            "ImportError",
+            "RuntimeError",
+            "manifest unknown",
+            "unauthorized",
+            "Error pulling image",
+        )
+        if marker in text
+    ]
+    torchao_extension_load_errors = []
+    for line in text.splitlines():
+        if "Failed to load" in line and ("torchao" in line or "_C_cutlass_90a" in line or "_C_mxfp8" in line):
+            torchao_extension_load_errors.append(truncate(line.strip(), 1200))
     runtime_certification = parse_runtime_certification_from_text(text)
     status_value = ""
     for line in text.splitlines():
@@ -756,6 +787,8 @@ def analyze_container_log_text(text: str) -> dict:
         traceback_tail = truncate(traceback_tail, 6000)
     return {
         "probe_output_markers_found": markers_found,
+        "failure_markers": failure_markers,
+        "torchao_extension_load_errors": torchao_extension_load_errors,
         "runtime_certification_detected_from_logs": bool(runtime_certification),
         "runtime_certification_value": runtime_certification,
         "status_line_truncated": status_value,
@@ -790,7 +823,8 @@ def collect_container_logs(base_url: str, api_key: str, instance_id: int, latest
             "body_truncated": result.get("body_truncated"),
         }
         endpoint_attempts.append(attempt)
-        body_text = result.get("body_text") or ""
+        body_text, body_decoded_from_base64 = display_log_text(result.get("body_text") or "")
+        attempt["decoded_from_base64"] = body_decoded_from_base64
         if result.get("http_status_code") == 200 and body_text.strip():
             best_text_parts.append(f"===== {path} =====\n{body_text}")
             best_source = "simplepod_log_endpoint"
@@ -893,9 +927,15 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
         "container_exit_detected": data.get("container_exit_detected", False),
         "container_exit_code": data.get("container_exit_code"),
         "container_status": data.get("container_status", ""),
+        "container_terminal_state_detected": data.get("container_terminal_state_detected", False),
+        "terminal_state": data.get("terminal_state", ""),
+        "terminal_state_seconds": data.get("terminal_state_seconds"),
         "instance_errors": data.get("instance_errors", []),
         "instance_warnings": data.get("instance_warnings", []),
         "probe_output_markers_found": data.get("probe_output_markers_found", []),
+        "failure_markers": data.get("failure_markers", []),
+        "torchao_extension_load_errors": data.get("torchao_extension_load_errors", []),
+        "final_decoded_console": data.get("final_decoded_console", ""),
         "runtime_certification_detected_from_logs": data.get("runtime_certification_detected_from_logs", False),
         "runtime_certification_value": data.get("runtime_certification_value", ""),
         "original_status": data.get("original_status", ""),
@@ -1010,6 +1050,7 @@ def wait_for_container_start(base_url: str, api_key: str, instance_id: int, time
             return {
                 "status": "container_terminal_before_probe_monitor",
                 "startup_seconds": round(time.monotonic() - started_monotonic, 3),
+                "terminal_state_seconds": round(time.monotonic() - started_monotonic, 3),
                 "latest_detail_json": latest_detail_json,
                 "latest_classification": latest_classification,
                 "status_history": status_history,
@@ -1073,6 +1114,7 @@ def monitor_probe(base_url: str, api_key: str, instance_id: int, timeout_seconds
         "observations": observations[-20:],
         "report_found": found_report is not None,
         "terminal_state_seen": terminal_seen,
+        "terminal_state_seconds": round(time.monotonic() - started_monotonic, 3) if terminal_seen else None,
         "report_retrieval_note": "The FP8 image does not expose FastAPI/R2. This script can only capture the report if SimplePod exposes it in instance details/log fields.",
         "fp8_runtime_report": found_report,
         "latest_detail_json": latest_detail_json,
@@ -1241,7 +1283,11 @@ def main() -> int:
         data["container_start_detected"] = bool(latest_classification.get("container_start_detected"))
         data["decoded_console"] = decoded_field_by_name(startup_text_fields, "console")
         data["decoded_console_system"] = decoded_field_by_name(startup_text_fields, "consoleSystem")
+        data["final_decoded_console"] = latest_classification.get("console_text") or ""
         data["status_history"] = startup_result.get("status_history", [])[-80:]
+        data["container_terminal_state_detected"] = startup_status == "container_terminal_before_probe_monitor"
+        data["terminal_state"] = latest_classification.get("status_value") or ""
+        data["terminal_state_seconds"] = startup_result.get("terminal_state_seconds")
 
         startup_status = startup_result.get("status")
         if startup_status in {"failed_image_pull", "blocked_image_pull_timeout", "blocked_startup_timeout"}:
@@ -1262,6 +1308,7 @@ def main() -> int:
             for key, value in log_collection.items():
                 if key not in {"container_log_endpoint_attempts", "instance_text_fields"}:
                     data[key] = value
+            data["final_decoded_console"] = log_collection.get("container_logs_truncated") or data.get("final_decoded_console", "")
             data["fp8_report_retrieval"].update(
                 {
                     "container_log_endpoint_attempts": log_collection.get("container_log_endpoint_attempts", []),
@@ -1273,7 +1320,7 @@ def main() -> int:
             log_certification = str(log_collection.get("runtime_certification_value") or "").upper()
             if log_certification == "PASS":
                 status = "succeeded_recovered_from_container_logs"
-            elif log_certification == "FAIL":
+            elif log_certification == "FAIL" or log_collection.get("failure_markers"):
                 status = "failed_recovered_from_container_logs"
             data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
             write_json(REPORT_PATH, build_report(args, status, data))
@@ -1336,6 +1383,9 @@ def main() -> int:
         data["container_exit_code"] = monitor_result.get("container_exit_code")
         data["container_status"] = monitor_result.get("container_status") or ""
         data["container_exit_detected"] = data["container_exit_code"] is not None or monitor_result.get("terminal_state_seen") is True
+        data["container_terminal_state_detected"] = monitor_result.get("terminal_state_seen") is True
+        data["terminal_state"] = data["container_status"]
+        data["terminal_state_seconds"] = monitor_result.get("terminal_state_seconds")
         data["instance_errors"] = [
             field for field in latest_status_fields if "error" in str(field.get("path") or field.get("key") or "").lower()
         ][:20]
@@ -1348,6 +1398,7 @@ def main() -> int:
         for key, value in log_collection.items():
             if key != "container_log_endpoint_attempts" and key != "instance_text_fields":
                 data[key] = value
+        data["final_decoded_console"] = log_collection.get("container_logs_truncated") or data.get("final_decoded_console", "")
         data["fp8_report_retrieval"].update(
             {
                 "container_log_endpoint_attempts": log_collection.get("container_log_endpoint_attempts", []),
@@ -1360,7 +1411,7 @@ def main() -> int:
         log_certification = str(log_collection.get("runtime_certification_value") or "").upper()
         if certification != "PASS" and log_certification == "PASS":
             status = "succeeded_recovered_from_container_logs"
-        elif certification != "PASS" and log_certification == "FAIL":
+        elif certification != "PASS" and (log_certification == "FAIL" or log_collection.get("failure_markers")):
             status = "failed_recovered_from_container_logs"
         elif (
             status != "probe_timeout_no_report"

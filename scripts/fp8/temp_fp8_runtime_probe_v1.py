@@ -1,5 +1,7 @@
 import argparse
+import ctypes
 import gc
+import glob
 import json
 import os
 import platform
@@ -15,6 +17,7 @@ SCRIPT_ID = "TEMP_FP8_RUNTIME_PROBE_V1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPORT_PATH = REPO_ROOT / "logs" / "fp8_runtime_probe_v1.json"
 DEFAULT_CERTIFICATION_PATH = REPO_ROOT / "logs" / "fp8_runtime_certification_v1.json"
+TORCHAO_EXTENSION_PATTERNS = ("_C_cutlass_90a*.so", "_C_mxfp8*.so")
 
 
 def now_iso() -> str:
@@ -28,6 +31,10 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def module_version(module: Any) -> str:
     return str(getattr(module, "__version__", "") or "")
+
+
+def module_file(module: Any) -> str:
+    return str(getattr(module, "__file__", "") or "")
 
 
 def safe_repr(value: Any, limit: int = 1000) -> str:
@@ -49,6 +56,54 @@ def runtime_scope() -> dict[str, bool]:
         "runs_inference": False,
         "generates_video": False,
         "generates_audio": False,
+    }
+
+
+def torchao_extension_probe(torchao_module: Any) -> dict[str, Any]:
+    torchao_file = module_file(torchao_module)
+    torchao_dir = Path(torchao_file).resolve().parent if torchao_file else Path("")
+    results = []
+    for pattern in TORCHAO_EXTENSION_PATTERNS:
+        paths = sorted(glob.glob(str(torchao_dir / pattern)))
+        if not paths:
+            results.append(
+                {
+                    "pattern": pattern,
+                    "status": "missing",
+                    "path": "",
+                    "error_type": "MissingExtension",
+                    "error_truncated": f"No TorchAO extension matched {pattern}",
+                }
+            )
+            continue
+        for path in paths:
+            try:
+                ctypes.CDLL(path)
+                status = "ok"
+                error_type = ""
+                error_truncated = ""
+            except Exception as exc:
+                status = "failed"
+                error_type = type(exc).__name__
+                error_truncated = str(exc)[:1000]
+            results.append(
+                {
+                    "pattern": pattern,
+                    "status": status,
+                    "path": path,
+                    "size_bytes": Path(path).stat().st_size if Path(path).exists() else None,
+                    "error_type": error_type,
+                    "error_truncated": error_truncated,
+                }
+            )
+    failed = [item for item in results if item.get("status") != "ok"]
+    return {
+        "torchao_file": torchao_file,
+        "torchao_dir": str(torchao_dir),
+        "extension_patterns": list(TORCHAO_EXTENSION_PATTERNS),
+        "extensions": results,
+        "failed_extensions": failed,
+        "all_required_extensions_loadable": not failed,
     }
 
 
@@ -146,6 +201,8 @@ def import_torchao_apis() -> dict[str, Any]:
 
         result["torchao_import_status"] = "ok"
         result["torchao_version"] = module_version(torchao)
+        result["torchao_file"] = module_file(torchao)
+        result["extension_probe"] = torchao_extension_probe(torchao)
     except Exception as exc:
         result.update(
             {
@@ -281,6 +338,7 @@ def certification_from_report(report: dict[str, Any]) -> dict[str, Any]:
         "cuda_device_present": int(report.get("runtime", {}).get("cuda_device_count") or 0) >= 1,
         "float8_weight_only_config_available": bool(report.get("apis", {}).get("float8_weight_only_config_available")),
         "quantize_available": bool(report.get("apis", {}).get("quantize_available")),
+        "torchao_extensions_loadable": bool(report.get("apis", {}).get("extension_probe", {}).get("all_required_extensions_loadable")),
         "quantization_succeeded": report.get("quantization_result", {}).get("status") == "succeeded",
         "nn_linear_preserved": bool(report.get("module_tree_check", {}).get("nn_linear_still_nn_linear")),
         "module_tree_preserved": bool(report.get("module_tree_check", {}).get("named_modules_preserved")),
@@ -365,6 +423,8 @@ def run_probe(report_path: Path, certification_path: Path) -> dict[str, Any]:
     report["torchao"] = {
         "import_status": apis.get("torchao_import_status"),
         "version": apis.get("torchao_version", ""),
+        "file": apis.get("torchao_file", ""),
+        "extension_probe": apis.get("extension_probe", {}),
     }
     report["runtime"] = runtime_info(torch, apis)
     report["apis"] = apis
