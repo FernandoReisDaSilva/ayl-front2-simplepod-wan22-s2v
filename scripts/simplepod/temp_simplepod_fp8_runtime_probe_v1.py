@@ -148,6 +148,33 @@ RUNNING_STATUSES = (
     "started",
 )
 
+NON_TERMINAL_STARTUP_STATES = {
+    "",
+    "unknown",
+    "created",
+    "pending",
+    "queued",
+    "preparing",
+    "provisioning",
+    "pulling",
+    "starting",
+    "initializing",
+}
+
+RUNNING_STATES = {
+    "running",
+    "active",
+    "ready",
+}
+
+TERMINAL_STATES = {
+    "deleted",
+    "terminated",
+    "exited",
+    "stopped",
+    "failed",
+}
+
 
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -582,14 +609,30 @@ def extract_status_value(status_fields: list[dict]) -> str:
     return ""
 
 
+def normalize_state(value) -> str:
+    return str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+
+
+def extract_current_status_value(detail_json, status_fields: list[dict] | None = None) -> str:
+    if isinstance(detail_json, dict):
+        for key in ("containerStatus", "status", "state", "phase", "containerState", "runtimeStatus"):
+            value = detail_json.get(key)
+            if value is not None:
+                return str(value)
+        for parent in ("container", "docker", "pod", "task", "job"):
+            nested = detail_json.get(parent)
+            if isinstance(nested, dict):
+                for key in ("containerStatus", "status", "state", "phase", "containerState", "runtimeStatus"):
+                    value = nested.get(key)
+                    if value is not None:
+                        return str(value)
+    return extract_status_value(status_fields or [])
+
+
 def terminal_state_seen(detail_json) -> bool:
     status_fields = collect_instance_status_fields(detail_json)
-    text = (
-        json.dumps(safe_instance_observation(detail_json), ensure_ascii=False)
-        + "\n"
-        + json.dumps(status_fields, ensure_ascii=False)
-    ).lower()
-    return any(marker in text for marker in TERMINAL_STATE_MARKERS)
+    current_state = normalize_state(extract_current_status_value(detail_json, status_fields))
+    return current_state in TERMINAL_STATES
 
 
 def combined_instance_text(detail_json) -> str:
@@ -605,28 +648,64 @@ def marker_seen(text: str, markers: tuple[str, ...]) -> bool:
 def classify_startup(detail_json) -> dict:
     status_fields = collect_instance_status_fields(detail_json)
     text = combined_instance_text(detail_json)
-    status_value = extract_status_value(status_fields)
-    status_lower = status_value.lower()
+    status_value = extract_current_status_value(detail_json, status_fields)
+    current_state = normalize_state(status_value)
     text_lower = text.lower()
-    image_pull_detected = marker_seen(text, STARTUP_PULL_MARKERS) or any(token in status_lower for token in CREATED_OR_PULLING_STATUSES)
+    matched_probe_markers = [
+        marker
+        for marker in ("[TEMP_FP8_RUNTIME_PROBE_V1]", "runtime_certification")
+        if marker in text or marker in text_lower
+    ]
+    matched_running_markers = [
+        marker
+        for marker in ("Image pulled", "Starting container", "Container started")
+        if marker in text
+    ]
+    if any(line.strip().lower() == "running" for line in text.splitlines()):
+        matched_running_markers.append("Running")
+    if any(line.strip().lower() == "ready" for line in text.splitlines()):
+        matched_running_markers.append("Ready")
+    matched_terminal_markers = [
+        state for state in TERMINAL_STATES if current_state == state
+    ]
+    image_pull_detected = marker_seen(text, STARTUP_PULL_MARKERS) or current_state in CREATED_OR_PULLING_STATUSES or current_state in {
+        "created",
+        "pending",
+        "queued",
+        "preparing",
+        "provisioning",
+        "pulling",
+        "starting",
+        "initializing",
+    }
     image_pull_completed = marker_seen(text, ("Image pulled",))
-    probe_output_detected = "[TEMP_FP8_RUNTIME_PROBE_V1]" in text or "runtime_certification" in text_lower
-    container_start_detected = (
-        marker_seen(text, STARTUP_READY_MARKERS)
-        or any(token in status_lower for token in RUNNING_STATUSES)
-        or probe_output_detected
-    )
+    probe_output_detected = bool(matched_probe_markers)
     image_pull_failed = marker_seen(text, IMAGE_PULL_ERROR_MARKERS) or any(marker.lower() in text_lower for marker in IMAGE_PULL_ERROR_MARKERS)
-    terminal_seen = terminal_state_seen(detail_json)
+    if current_state in TERMINAL_STATES:
+        terminal_seen = True
+        container_start_detected = False
+    elif current_state in RUNNING_STATES:
+        terminal_seen = False
+        container_start_detected = True
+    elif current_state in NON_TERMINAL_STARTUP_STATES:
+        terminal_seen = False
+        container_start_detected = False
+    else:
+        terminal_seen = False
+        container_start_detected = bool(matched_running_markers or matched_probe_markers)
     return {
         "status_fields": status_fields,
         "text_fields": collect_instance_text_fields(detail_json),
         "console_text": text,
         "status_value": status_value,
+        "current_state_normalized": current_state,
         "container_exit_code": extract_exit_code(status_fields),
         "image_pull_detected": image_pull_detected,
         "image_pull_completed": image_pull_completed,
         "probe_output_detected": probe_output_detected,
+        "matched_probe_markers": matched_probe_markers,
+        "matched_running_markers": matched_running_markers,
+        "matched_terminal_markers": matched_terminal_markers,
         "container_start_detected": container_start_detected,
         "image_pull_failed": image_pull_failed,
         "terminal_state_seen": terminal_seen,
@@ -997,7 +1076,15 @@ def wait_for_instance_observable(base_url: str, api_key: str, instance_id: int, 
     return "timeout", observations
 
 
-def wait_for_container_start(base_url: str, api_key: str, instance_id: int, timeout_seconds: int, poll_interval_seconds: int) -> dict:
+def wait_for_container_start(
+    base_url: str,
+    api_key: str,
+    instance_id: int,
+    timeout_seconds: int,
+    poll_interval_seconds: int,
+    *,
+    debug_startup_classification: bool = False,
+) -> dict:
     started_monotonic = time.monotonic()
     deadline = started_monotonic + max(1, timeout_seconds)
     detail_path = smoke.INSTANCE_DETAIL_PATH.format(id=instance_id)
@@ -1013,6 +1100,24 @@ def wait_for_container_start(base_url: str, api_key: str, instance_id: int, time
         latest_detail_json = detail_result.get("json")
         classification = classify_startup(latest_detail_json)
         latest_classification = classification
+        if debug_startup_classification:
+            print(
+                json.dumps(
+                    {
+                        "status_value": classification.get("status_value"),
+                        "container_start_detected": classification.get("container_start_detected"),
+                        "terminal_state_seen": classification.get("terminal_state_seen"),
+                        "image_pull_detected": classification.get("image_pull_detected"),
+                        "image_pull_completed": classification.get("image_pull_completed"),
+                        "image_pull_failed": classification.get("image_pull_failed"),
+                        "matched_probe_markers": classification.get("matched_probe_markers", []),
+                        "matched_running_markers": classification.get("matched_running_markers", []),
+                        "matched_terminal_markers": classification.get("matched_terminal_markers", []),
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
         progress_line = startup_progress_line(classification)
         if progress_line != last_progress_line:
             print(f"[{SCRIPT_ID}] startup {progress_line}", flush=True)
@@ -1138,6 +1243,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--probe-timeout-seconds", type=int, default=300)
     parser.add_argument("--poll-interval-seconds", type=int, default=10)
     parser.add_argument("--instance-market", default="", help="Optional explicit /instances/market/{id}; normally auto-selected.")
+    parser.add_argument("--debug-startup-classification", action="store_true", help="Print safe startup classification details on each poll.")
     parser.add_argument("--run-mock-tests", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.ready_timeout_seconds is not None:
@@ -1179,8 +1285,91 @@ def run_mock_tests() -> int:
     original_http_request = smoke.http_request
     original_sleep = time.sleep
     original_http_text_request = globals()["http_text_request"]
+
+    def announce(name: str, extra: str = "") -> None:
+        suffix = f" {extra}" if extra else ""
+        print(f"{name}: PASS{suffix}", flush=True)
+
+    def require_classification(name: str, payload: dict, expected: dict) -> dict:
+        classification = classify_startup(payload)
+        for key, value in expected.items():
+            assert classification.get(key) == value, {"name": name, "expected": expected, "actual": classification}
+        announce(name)
+        return classification
+
     try:
         time.sleep = lambda _seconds: None
+
+        require_classification(
+            "startup_classification_created_pure",
+            {
+                "id": 123,
+                "instanceId": 123,
+                "containerId": "abc123",
+                "status": "created",
+                "containerStatus": "created",
+                "startedAt": "2026-07-16T00:00:00Z",
+                "history": [{"status": "queued"}, {"status": "created"}],
+                "console": b64_text("Your instance will be ready shortly. Download starting, please wait up to 5 minutes.\n"),
+            },
+            {
+                "status_value": "created",
+                "container_start_detected": False,
+                "terminal_state_seen": False,
+                "image_pull_failed": False,
+            },
+        )
+
+        require_classification(
+            "startup_classification_created_historical_running",
+            {
+                "status": "created",
+                "containerStatus": "created",
+                "history": [{"status": "running"}, {"message": "Container started previously"}],
+                "console": b64_text("Historical state: running\n"),
+            },
+            {
+                "status_value": "created",
+                "container_start_detected": False,
+                "terminal_state_seen": False,
+            },
+        )
+
+        require_classification(
+            "startup_classification_created_torchao_error",
+            make_mock_instance(
+                "created",
+                "torchao failed to load _C_cutlass_90a and _C_mxfp8\n",
+            ),
+            {
+                "status_value": "created",
+                "container_start_detected": False,
+                "terminal_state_seen": False,
+            },
+        )
+
+        require_classification(
+            "startup_classification_running",
+            make_mock_instance("running", "Running\n"),
+            {
+                "status_value": "running",
+                "container_start_detected": True,
+                "terminal_state_seen": False,
+            },
+        )
+
+        require_classification(
+            "startup_classification_deleted_with_old_probe_marker",
+            make_mock_instance(
+                "deleted",
+                "[TEMP_FP8_RUNTIME_PROBE_V1] runtime_certification=PASS\n",
+            ),
+            {
+                "status_value": "deleted",
+                "container_start_detected": False,
+                "terminal_state_seen": True,
+            },
+        )
 
         created = make_mock_instance("created", "[mock] Preparing instance...\n")
         created_again = make_mock_instance("created", "[mock] Preparing instance...\n")
@@ -1208,6 +1397,7 @@ def run_mock_tests() -> int:
         assert startup_result["status_history"][0]["container_status"] == "created", startup_result
         assert startup_result["status_history"][2]["image_pull_detected"] is True, startup_result
         assert startup_result["latest_classification"]["container_start_detected"] is True, startup_result
+        announce("startup_poll_created_created_pulling_running", f"polls={calls['count']}")
 
         probe_sequence = [
             make_mock_instance(
@@ -1234,6 +1424,7 @@ def run_mock_tests() -> int:
 
         deleted_sequence = [
             make_mock_instance("created", "[mock] Preparing instance...\n"),
+            make_mock_instance("created", "[mock] Pulling image...\n"),
             make_mock_instance("deleted", "[mock] Failed to load /usr/local/lib/python3.10/dist-packages/torchao/_C_cutlass_90a.abi3.so\n"),
         ]
         deleted_calls = {"count": 0}
@@ -1265,11 +1456,14 @@ def run_mock_tests() -> int:
         globals()["http_text_request"] = fake_text_request
         deleted_result = wait_for_container_start("https://mock.simplepod.local", "token", 123, 30, 0)
         assert deleted_result["status"] == "container_terminal_before_probe_monitor", deleted_result
+        assert deleted_calls["count"] == 3, deleted_result
         assert deleted_result["latest_classification"]["terminal_state_seen"] is True, deleted_result
+        assert deleted_result["latest_classification"]["container_start_detected"] is False, deleted_result
         log_collection = collect_container_logs("https://mock.simplepod.local", "token", 123, deleted_result["latest_detail_json"])
         assert log_collection["container_logs_retrieved"] is True, log_collection
         assert log_collection["torchao_extension_load_errors"], log_collection
         assert "_C_cutlass_90a" in log_collection["container_logs_truncated"], log_collection
+        announce("startup_poll_created_pulling_deleted", f"polls={deleted_calls['count']}")
 
         idempotent_delete_result = safe_result(
             {
@@ -1415,6 +1609,7 @@ def main() -> int:
                 instance_id,
                 args.startup_timeout_seconds,
                 args.poll_interval_seconds,
+                debug_startup_classification=args.debug_startup_classification,
             )
         data["monitoring"] = {
             "startup": {
