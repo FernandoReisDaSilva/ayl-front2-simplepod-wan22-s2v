@@ -4,7 +4,7 @@ boto3==1.35.90
 python-dotenv==1.0.1
 huggingface_hub[cli]==0.27.1
 accelerate==1.2.1
-dashscope
+dashscope==1.26.3
 diffusers==0.32.1
 easydict==1.13
 einops==0.8.1

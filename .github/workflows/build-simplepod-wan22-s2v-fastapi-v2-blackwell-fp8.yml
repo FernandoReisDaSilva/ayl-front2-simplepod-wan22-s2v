@@ -1,12 +1,12 @@
-name: Build SimplePod Wan2.2 S2V Blackwell FP8 Runtime Probe
+name: Build SimplePod Wan2.2 S2V Blackwell FP8 Wan Gate 0
 
 on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Experimental FP8 runtime probe image tag."
+        description: "Experimental FP8 Wan Gate 0 image tag."
         required: true
-        default: "0.3.01-blackwell-fp8-runtime-probe-v2"
+        default: "0.3.02-blackwell-fp8-wan-gate0-v1"
         type: string
 
 permissions:
@@ -18,7 +18,7 @@ env:
 
 jobs:
   build:
-    name: Build and publish FP8 runtime probe image
+    name: Build and publish FP8 Wan Gate 0 image
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -47,8 +47,10 @@ jobs:
         run: |
           python3 -m py_compile scripts/fp8/temp_fp8_runtime_probe_v1.py
           python3 -m py_compile scripts/fp8/temp_fp8_build_smoke_v1.py
+          python3 -m py_compile scripts/fp8/temp_fp8_wan_gate0_probe_v1.py
+          python3 scripts/fp8/temp_fp8_wan_gate0_probe_v1.py --run-mock-tests
 
-      - name: Build FP8 runtime probe image
+      - name: Build FP8 Wan Gate 0 image
         run: |
           docker build \
             -f docker/simplepod-wan22-s2v-fastapi-v2-blackwell-fp8/Dockerfile \
@@ -58,5 +60,8 @@ jobs:
       - name: Validate TorchAO imports inside image
         run: docker run --rm --entrypoint python "${IMAGE_NAME}:${{ inputs.image_tag }}" ./temp_fp8_build_smoke_v1.py
 
-      - name: Push FP8 runtime probe image
+      - name: Validate Wan Gate 0 mock inside image
+        run: docker run --rm --entrypoint python "${IMAGE_NAME}:${{ inputs.image_tag }}" ./temp_fp8_wan_gate0_probe_v1.py --mock-stage success --report-path /tmp/fp8_wan_gate0_mock.json
+
+      - name: Push FP8 Wan Gate 0 image
         run: docker push "${IMAGE_NAME}:${{ inputs.image_tag }}"
