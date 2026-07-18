@@ -749,8 +749,16 @@ def maybe_json_from_string(value: str):
 def looks_like_fp8_report(value) -> bool:
     if not isinstance(value, dict):
         return False
-    text = json.dumps(value, ensure_ascii=False)
-    return any(marker in text for marker in REPORT_MARKERS)
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            if any(str(key).lower() == "runtime_certification" for key in current):
+                return True
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return False
 
 
 def find_fp8_report(value, *, max_depth: int = 10):
@@ -830,6 +838,21 @@ def parse_runtime_certification_from_text(text: str) -> str:
     if "runtime_certification = fail" in lowered or "runtime_certification=fail" in lowered:
         return "FAIL"
     return ""
+
+
+def find_fp8_report_in_text(text: str):
+    for line in text.splitlines():
+        parsed = maybe_json_from_string(line)
+        if parsed is not None:
+            report = find_fp8_report(parsed)
+            if report is not None:
+                return report
+    parsed = maybe_json_from_string(text)
+    if parsed is not None:
+        report = find_fp8_report(parsed)
+        if report is not None:
+            return report
+    return None
 
 
 def analyze_container_log_text(text: str) -> dict:
@@ -932,6 +955,7 @@ def collect_container_logs(base_url: str, api_key: str, instance_id: int, latest
         write_text(CONTAINER_LOG_PATH, combined_text)
 
     analysis = analyze_container_log_text(combined_text)
+    report_from_logs = find_fp8_report_in_text(combined_text)
     return {
         "container_logs_attempted": True,
         "container_logs_retrieved": bool(combined_text.strip()),
@@ -942,6 +966,8 @@ def collect_container_logs(base_url: str, api_key: str, instance_id: int, latest
         "container_logs_truncated": truncate(combined_text, 12000),
         "container_log_endpoint_attempts": endpoint_attempts,
         "instance_text_fields": detail_text_fields[:40],
+        "fp8_runtime_report_from_logs": report_from_logs,
+        "report_available_from_logs": report_from_logs is not None,
         **analysis,
     }
 
@@ -1174,13 +1200,28 @@ def wait_for_container_start(
     }
 
 
-def monitor_probe(base_url: str, api_key: str, instance_id: int, timeout_seconds: int, poll_interval_seconds: int) -> dict:
+def monitor_probe(
+    base_url: str,
+    api_key: str,
+    instance_id: int,
+    timeout_seconds: int,
+    poll_interval_seconds: int,
+    *,
+    debug_probe_monitor: bool = False,
+) -> dict:
     started_monotonic = time.monotonic()
     deadline = time.monotonic() + max(1, timeout_seconds)
     detail_path = smoke.INSTANCE_DETAIL_PATH.format(id=instance_id)
     observations = []
     found_report = None
     terminal_seen = False
+    logs_endpoint_unavailable_seen = False
+    report_channel_unavailable_seen = False
+    runtime_certification_value = ""
+    runtime_certification_detected = False
+    explicit_failure_seen = False
+    matched_failure_markers = []
+    latest_log_collection = {}
     latest_detail_json = None
     latest_status_fields = []
     polls = 0
@@ -1191,6 +1232,37 @@ def monitor_probe(base_url: str, api_key: str, instance_id: int, timeout_seconds
         latest_detail_json = detail_json
         latest_status_fields = collect_instance_status_fields(detail_json)
         report = find_fp8_report(detail_json)
+        log_collection = collect_container_logs(base_url, api_key, instance_id, detail_json)
+        latest_log_collection = log_collection
+        if log_collection.get("fp8_runtime_report_from_logs") is not None and report is None:
+            report = log_collection.get("fp8_runtime_report_from_logs")
+        log_certification = str(log_collection.get("runtime_certification_value") or "").upper()
+        report_summary = summarize_fp8_report(report)
+        report_certification = str(report_summary.get("runtime_certification") or "").upper()
+        runtime_certification_value = report_certification or log_certification
+        runtime_certification_detected = bool(runtime_certification_value)
+        matched_failure_markers = list(log_collection.get("failure_markers") or [])
+        explicit_failure_seen = runtime_certification_value == "FAIL" or bool(matched_failure_markers)
+        endpoint_attempts = log_collection.get("container_log_endpoint_attempts") or []
+        logs_endpoint_unavailable = bool(endpoint_attempts) and not any(
+            attempt.get("http_status_code") == 200 and (attempt.get("body_truncated") or "").strip()
+            for attempt in endpoint_attempts
+        )
+        logs_endpoint_unavailable_seen = logs_endpoint_unavailable_seen or logs_endpoint_unavailable
+        report_channel_unavailable = report is None and not log_collection.get("container_logs_retrieved")
+        report_channel_unavailable_seen = report_channel_unavailable_seen or report_channel_unavailable
+        terminal_now = terminal_state_seen(detail_json)
+        container_status = extract_current_status_value(detail_json, latest_status_fields)
+        if report is not None:
+            next_action = "return_report_found"
+        elif runtime_certification_value == "PASS":
+            next_action = "return_runtime_certification_pass"
+        elif explicit_failure_seen:
+            next_action = "return_runtime_certification_failed"
+        elif terminal_now:
+            next_action = "return_terminal_without_report"
+        else:
+            next_action = "continue_polling"
         observation = {
             "observed_at": now_iso(),
             "poll": polls,
@@ -1198,37 +1270,100 @@ def monitor_probe(base_url: str, api_key: str, instance_id: int, timeout_seconds
             "instance": safe_instance_observation(detail_json),
             "status_fields": latest_status_fields[:30],
             "fp8_report_marker_seen": report is not None,
-            "terminal_state_seen": terminal_state_seen(detail_json),
+            "terminal_state_seen": terminal_now,
+            "container_status": container_status,
+            "logs_available": bool(log_collection.get("container_logs_retrieved")),
+            "report_available": report is not None,
+            "runtime_certification_detected": runtime_certification_detected,
+            "runtime_certification_value": runtime_certification_value,
+            "matched_failure_markers": matched_failure_markers,
+            "probe_state": "probe_report_found" if report is not None else ("probe_terminal_without_report" if terminal_now else "probe_running_no_report_yet"),
+            "next_action": next_action,
         }
         observations.append(observation)
+        print(
+            f"[{SCRIPT_ID}] probe poll={polls} status={container_status or 'unknown'} "
+            f"logs={str(observation['logs_available']).lower()} "
+            f"report={str(observation['report_available']).lower()} "
+            f"cert={runtime_certification_value or 'none'} next={next_action}",
+            flush=True,
+        )
+        if debug_probe_monitor:
+            print(
+                json.dumps(
+                    {
+                        "elapsed_seconds": round(time.monotonic() - started_monotonic, 3),
+                        "container_status": container_status,
+                        "terminal_state_seen": terminal_now,
+                        "logs_available": bool(log_collection.get("container_logs_retrieved")),
+                        "report_available": report is not None,
+                        "runtime_certification_detected": runtime_certification_detected,
+                        "runtime_certification_value": runtime_certification_value,
+                        "matched_failure_markers": matched_failure_markers,
+                        "next_action": next_action,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
         if report is not None:
             found_report = report
             break
-        if observation["terminal_state_seen"]:
+        if runtime_certification_value == "PASS":
+            found_report = {
+                "runtime_certification": "PASS",
+                "status": "succeeded_recovered_from_container_logs",
+                "source": "container_logs",
+            }
+            break
+        if explicit_failure_seen:
+            break
+        if terminal_now:
             terminal_seen = True
             break
         time.sleep(max(1, poll_interval_seconds))
 
     if found_report is not None:
-        status = "report_found"
+        status = "completed"
+    elif explicit_failure_seen:
+        status = "runtime_certification_failed"
     elif terminal_seen:
-        status = "terminal_state_seen_without_report"
+        status = "probe_terminal_without_report"
     else:
-        status = "timeout_without_report"
+        status = "probe_timeout"
+    if status == "probe_timeout" and logs_endpoint_unavailable_seen:
+        probe_state = "probe_logs_endpoint_unavailable"
+    elif status == "probe_timeout" and report_channel_unavailable_seen:
+        probe_state = "probe_report_channel_unavailable"
+    elif status == "probe_timeout":
+        probe_state = "probe_timeout"
+    elif status == "probe_terminal_without_report":
+        probe_state = "probe_terminal_without_report"
+    elif status == "runtime_certification_failed":
+        probe_state = "runtime_certification_failed"
+    else:
+        probe_state = "probe_report_found"
     return {
         "status": status,
+        "probe_state": probe_state,
         "polls": polls,
         "observations": observations[-20:],
         "report_found": found_report is not None,
         "terminal_state_seen": terminal_seen,
         "terminal_state_seconds": round(time.monotonic() - started_monotonic, 3) if terminal_seen else None,
-        "report_retrieval_note": "The FP8 image does not expose FastAPI/R2. This script can only capture the report if SimplePod exposes it in instance details/log fields.",
+        "report_retrieval_note": "The FP8 image does not expose FastAPI/R2. Polling continues until explicit report/certification, terminal state, or probe timeout.",
         "fp8_runtime_report": found_report,
         "latest_detail_json": latest_detail_json,
         "latest_status_fields": latest_status_fields,
         "container_exit_code": extract_exit_code(latest_status_fields),
-        "container_status": extract_status_value(latest_status_fields),
+        "container_status": extract_current_status_value(latest_detail_json, latest_status_fields),
         "probe_seconds": round(time.monotonic() - started_monotonic, 3),
+        "runtime_certification_detected": runtime_certification_detected,
+        "runtime_certification_value": runtime_certification_value,
+        "matched_failure_markers": matched_failure_markers,
+        "logs_endpoint_unavailable_seen": logs_endpoint_unavailable_seen,
+        "report_channel_unavailable_seen": report_channel_unavailable_seen,
+        "latest_log_collection": latest_log_collection,
     }
 
 
@@ -1244,6 +1379,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-interval-seconds", type=int, default=10)
     parser.add_argument("--instance-market", default="", help="Optional explicit /instances/market/{id}; normally auto-selected.")
     parser.add_argument("--debug-startup-classification", action="store_true", help="Print safe startup classification details on each poll.")
+    parser.add_argument("--debug-probe-monitor", action="store_true", help="Print safe probe monitor details on each poll.")
     parser.add_argument("--run-mock-tests", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.ready_timeout_seconds is not None:
@@ -1284,6 +1420,7 @@ def make_mock_instance(status_value: str, console_text: str = "", **extra) -> di
 def run_mock_tests() -> int:
     original_http_request = smoke.http_request
     original_sleep = time.sleep
+    original_monotonic = time.monotonic
     original_http_text_request = globals()["http_text_request"]
 
     def announce(name: str, extra: str = "") -> None:
@@ -1296,6 +1433,60 @@ def run_mock_tests() -> int:
             assert classification.get(key) == value, {"name": name, "expected": expected, "actual": classification}
         announce(name)
         return classification
+
+    class FakeClock:
+        def __init__(self) -> None:
+            self.current = 0.0
+
+        def monotonic(self) -> float:
+            return self.current
+
+        def sleep(self, seconds: float) -> None:
+            self.current += max(0.001, float(seconds))
+
+    def make_text_response(path: str, text: str = "", *, http_status_code: int = 200) -> dict:
+        return {
+            "attempted": True,
+            "status": "succeeded" if http_status_code == 200 else "failed",
+            "method": "GET",
+            "path": path,
+            "http_status_code": http_status_code,
+            "content_type": "text/plain",
+            "body_bytes": len(text.encode("utf-8")),
+            "body_text": text,
+            "body_truncated": truncate(text, 8000),
+        }
+
+    def run_monitor_mock(detail_sequence: list[dict], log_sequence: list[str | None], *, timeout_seconds: int = 30) -> tuple[dict, dict]:
+        clock = FakeClock()
+        calls = {"detail": 0, "text": 0}
+
+        def fake_monitor_http_request(_base_url, _path, _api_key="", **_kwargs):
+            index = min(calls["detail"], len(detail_sequence) - 1)
+            calls["detail"] += 1
+            return {
+                "attempted": True,
+                "status": "succeeded",
+                "method": "GET",
+                "path": _path,
+                "http_status_code": 200,
+                "json": detail_sequence[index],
+            }
+
+        def fake_monitor_text_request(_base_url, path, _api_key, timeout_seconds=30):
+            poll_index = max(0, calls["detail"] - 1)
+            text = log_sequence[min(poll_index, len(log_sequence) - 1)] if log_sequence else ""
+            calls["text"] += 1
+            if text is None:
+                return make_text_response(path, "", http_status_code=404)
+            return make_text_response(path, text, http_status_code=200)
+
+        smoke.http_request = fake_monitor_http_request
+        globals()["http_text_request"] = fake_monitor_text_request
+        time.monotonic = clock.monotonic
+        time.sleep = clock.sleep
+        result = monitor_probe("https://mock.simplepod.local", "token", 123, timeout_seconds, 0)
+        return result, calls
 
     try:
         time.sleep = lambda _seconds: None
@@ -1418,8 +1609,9 @@ def run_mock_tests() -> int:
             }
 
         smoke.http_request = fake_probe_http_request
+        globals()["http_text_request"] = lambda _base_url, path, _api_key, timeout_seconds=30: make_text_response(path, "", http_status_code=404)
         probe_result = monitor_probe("https://mock.simplepod.local", "token", 123, 30, 0)
-        assert probe_result["status"] == "report_found", probe_result
+        assert probe_result["status"] == "completed", probe_result
         assert probe_result["report_found"] is True, probe_result
 
         deleted_sequence = [
@@ -1478,11 +1670,88 @@ def run_mock_tests() -> int:
         )
         assert idempotent_delete_result["http_status_code"] == 404, idempotent_delete_result
 
+        running_empty = make_mock_instance("running", "")
+        pass_log = "[TEMP_FP8_RUNTIME_PROBE_V1] status=succeeded runtime_certification=PASS\n"
+        result, calls = run_monitor_mock(
+            [running_empty, running_empty, running_empty, running_empty],
+            ["", "", "", pass_log],
+        )
+        assert result["status"] == "completed", result
+        assert result["runtime_certification_value"] == "PASS", result
+        assert calls["detail"] == 4, result
+        announce("probe_monitor_running_no_logs_then_pass", f"polls={calls['detail']}")
+
+        result, calls = run_monitor_mock(
+            [running_empty, running_empty, running_empty, running_empty],
+            ["", "", "", ""],
+            timeout_seconds=3,
+        )
+        assert result["status"] == "probe_timeout", result
+        assert calls["detail"] >= 2, result
+        announce("probe_monitor_timeout_waits_full_window")
+
+        detail_pass = make_mock_instance(
+            "running",
+            "",
+            report={"runtime_certification": "PASS", "status": "succeeded"},
+        )
+        result, calls = run_monitor_mock(
+            [running_empty, running_empty, detail_pass],
+            [None, None, None],
+        )
+        assert result["status"] == "completed", result
+        assert result["report_found"] is True, result
+        assert result["logs_endpoint_unavailable_seen"] is True, result
+        assert calls["detail"] == 3, result
+        announce("probe_monitor_logs_endpoint_unavailable_continues")
+
+        deleted_no_report = make_mock_instance("deleted", "")
+        result, _calls = run_monitor_mock(
+            [running_empty, deleted_no_report],
+            ["", ""],
+        )
+        assert result["status"] == "probe_terminal_without_report", result
+        announce("probe_monitor_terminal_without_report")
+
+        fail_log = "[TEMP_FP8_RUNTIME_PROBE_V1] status=failed runtime_certification=FAIL error=_C_mxfp8\n"
+        result, _calls = run_monitor_mock(
+            [running_empty],
+            [fail_log],
+        )
+        assert result["status"] == "runtime_certification_failed", result
+        assert result["runtime_certification_value"] == "FAIL", result
+        announce("probe_monitor_explicit_fail")
+
+        json_pass = make_mock_instance(
+            "running",
+            "",
+            report={"runtime_certification": "PASS", "status": "succeeded", "torch_version": "mock"},
+        )
+        result, _calls = run_monitor_mock(
+            [json_pass],
+            [""],
+        )
+        assert result["status"] == "completed", result
+        assert result["runtime_certification_value"] == "PASS", result
+        announce("probe_monitor_json_pass")
+
+        start_scripts = make_mock_instance("running", "Running start scripts...\n")
+        result, calls = run_monitor_mock(
+            [start_scripts, start_scripts, make_mock_instance("running", "")],
+            ["", "", pass_log],
+        )
+        assert result["status"] == "completed", result
+        assert calls["detail"] == 3, result
+        first_observation = result["observations"][0]
+        assert first_observation["next_action"] == "continue_polling", result
+        announce("probe_monitor_start_scripts_only_continues")
+
         print(f"[{SCRIPT_ID}] mock_tests=passed", flush=True)
         return 0
     finally:
         smoke.http_request = original_http_request
         time.sleep = original_sleep
+        time.monotonic = original_monotonic
         globals()["http_text_request"] = original_http_text_request
 
 
@@ -1698,6 +1967,7 @@ def main() -> int:
                     instance_id,
                     args.probe_timeout_seconds,
                     args.poll_interval_seconds,
+                    debug_probe_monitor=args.debug_probe_monitor,
                 )
         data["monitoring"]["probe"] = {
             key: value
@@ -1708,6 +1978,7 @@ def main() -> int:
         data["fp8_report_retrieval"].update(
             {
                 "status": monitor_result.get("status"),
+                "probe_state": monitor_result.get("probe_state"),
                 "report_found": monitor_result.get("report_found"),
                 "terminal_state_seen": monitor_result.get("terminal_state_seen"),
             }
@@ -1717,12 +1988,14 @@ def main() -> int:
         certification = str(fp8_summary.get("runtime_certification") or "").upper()
         if certification == "PASS":
             status = "succeeded"
+        elif monitor_result.get("status") == "runtime_certification_failed":
+            status = "failed_recovered_from_container_logs"
         elif monitor_result.get("report_found"):
             status = "probe_completed_certification_failed"
         elif monitor_result.get("terminal_state_seen"):
-            status = "blocked_report_retrieval_not_exposed_by_simplepod_api"
+            status = "probe_terminal_without_report"
         else:
-            status = "probe_timeout_no_report"
+            status = "probe_timeout"
         data["original_status"] = status
 
         latest_detail_json = monitor_result.get("latest_detail_json")
@@ -1742,7 +2015,7 @@ def main() -> int:
         ][:20]
 
         with timer.phase("collect_container_logs"):
-            log_collection = collect_container_logs(base_url, api_key, instance_id, latest_detail_json)
+            log_collection = monitor_result.get("latest_log_collection") or collect_container_logs(base_url, api_key, instance_id, latest_detail_json)
         for key, value in log_collection.items():
             if key != "container_log_endpoint_attempts" and key != "instance_text_fields":
                 data[key] = value
@@ -1761,12 +2034,8 @@ def main() -> int:
             status = "succeeded_recovered_from_container_logs"
         elif certification != "PASS" and (log_certification == "FAIL" or log_collection.get("failure_markers")):
             status = "failed_recovered_from_container_logs"
-        elif (
-            status != "probe_timeout_no_report"
-            and not monitor_result.get("report_found")
-            and not log_collection.get("container_logs_retrieved")
-        ):
-            status = "blocked_container_logs_not_exposed_by_simplepod_api"
+        elif status == "probe_timeout" and not log_collection.get("container_logs_retrieved"):
+            status = "probe_timeout"
         data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
         write_json(REPORT_PATH, build_report(args, status, data))
         print(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}", flush=True)
