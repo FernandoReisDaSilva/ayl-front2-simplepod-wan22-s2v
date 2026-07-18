@@ -117,6 +117,29 @@ The probe emits compact stdout markers and writes structured JSON:
 - `first_inference_started`
 - `first_inference_finished`
 
+Wan load diagnostics:
+
+- `wan_load_preflight.cwd`
+- `wan_load_preflight.path_cwd`
+- `wan_load_preflight.probe_file`
+- `wan_load_preflight.loader_entrypoint`
+- `wan_load_preflight.environment_variables`
+- `wan_load_preflight.path_checks`
+- `wan_load_preflight.tree_inventory`
+
+If `FileNotFoundError` occurs during `wan_load`, the top-level report now records:
+
+- `missing_path`
+- `resolved_path`
+- `cwd`
+- `probe_file`
+- `loader_entrypoint`
+- `exception_errno`
+- `exception_filename`
+- `exception_type`
+- `exception_message`
+- `traceback`
+
 Memory metrics:
 
 - `allocated_gb`

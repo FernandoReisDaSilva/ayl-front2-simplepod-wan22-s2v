@@ -1,4 +1,5 @@
 import argparse
+import errno
 import gc
 import importlib.metadata
 import json
@@ -24,6 +25,14 @@ TASK = "s2v-14B"
 MIN_LINEAR_PARAMS = int(os.getenv("AYL_FP8_GATE0_MIN_LINEAR_PARAMS", "16384"))
 DEFAULT_INFER_FRAMES = int(os.getenv("AYL_FP8_GATE0_INFER_FRAMES", "1"))
 DEFAULT_MAX_AREA = int(os.getenv("AYL_FP8_GATE0_MAX_AREA", str(256 * 256)))
+LOADER_ENTRYPOINT = "wan.speech2video.WanS2V"
+LOADER_REQUIRED_RELATIVE_PATHS = (
+    "generate.py",
+    "wan/__init__.py",
+    "wan/speech2video.py",
+    "wan/configs/__init__.py",
+    "wan/modules/s2v/model_s2v.py",
+)
 
 
 def now_iso() -> str:
@@ -50,6 +59,94 @@ def package_version(package_name: str) -> str:
         return importlib.metadata.version(package_name)
     except importlib.metadata.PackageNotFoundError:
         return ""
+
+
+def path_check(path: Path) -> dict[str, Any]:
+    expanded = path.expanduser()
+    try:
+        resolved = expanded.resolve(strict=False)
+    except Exception:
+        resolved = expanded.absolute()
+    return {
+        "checked_path": str(path),
+        "resolved_path": str(resolved),
+        "exists": expanded.exists(),
+        "is_dir": expanded.is_dir(),
+        "is_file": expanded.is_file(),
+    }
+
+
+def relevant_env_snapshot() -> dict[str, str]:
+    keys = ("WAN_ROOT", "WAN_HOME", "MODEL_DIR", "CHECKPOINT_DIR", "WAN22_S2V_MODEL_DIR", "WAN22_REPO_DIR", "HF_HOME", "HOME", "PWD")
+    return {key: os.environ[key] for key in keys if os.environ.get(key)}
+
+
+def directory_inventory(path: Path, *, max_entries: int = 80, max_depth: int = 2) -> dict[str, Any]:
+    root = path.expanduser()
+    result = {
+        "root": str(path),
+        "resolved_root": str(root.resolve(strict=False)),
+        "exists": root.exists(),
+        "entries": [],
+        "truncated": False,
+        "max_entries": max_entries,
+        "max_depth": max_depth,
+    }
+    if not root.exists() or not root.is_dir():
+        return result
+    count = 0
+    for item in sorted(root.rglob("*"), key=lambda entry: str(entry)):
+        try:
+            relative = item.relative_to(root)
+        except ValueError:
+            continue
+        if len(relative.parts) > max_depth:
+            continue
+        if count >= max_entries:
+            result["truncated"] = True
+            break
+        entry = {
+            "path": str(relative),
+            "is_dir": item.is_dir(),
+            "is_file": item.is_file(),
+        }
+        if item.is_file():
+            try:
+                entry["size_bytes"] = item.stat().st_size
+            except OSError:
+                entry["size_bytes"] = None
+        result["entries"].append(entry)
+        count += 1
+    return result
+
+
+def add_loader_preflight(report: dict[str, Any], args: argparse.Namespace) -> None:
+    wan_root = Path(args.wan_repo_dir)
+    model_dir = Path(args.model_dir)
+    required_paths = [
+        ("wan_root", wan_root),
+        ("model_dir", model_dir),
+        ("checkpoint_dir", model_dir),
+        *[(f"wan_loader:{relative}", wan_root / relative) for relative in LOADER_REQUIRED_RELATIVE_PATHS],
+    ]
+    report["wan_load_preflight"] = {
+        "cwd": os.getcwd(),
+        "path_cwd": str(Path.cwd()),
+        "probe_file": str(Path(__file__).resolve()),
+        "loader_entrypoint": LOADER_ENTRYPOINT,
+        "environment_variables": relevant_env_snapshot(),
+        "path_checks": [{"label": label, **path_check(path)} for label, path in required_paths],
+        "tree_inventory": {
+            "wan_root": directory_inventory(wan_root, max_entries=80, max_depth=2),
+            "model_dir": directory_inventory(model_dir, max_entries=80, max_depth=2),
+            "checkpoint_dir": directory_inventory(model_dir, max_entries=80, max_depth=2),
+        },
+    }
+
+
+def raise_missing_path(path: Path, message: str) -> None:
+    resolved = path.expanduser().resolve(strict=False)
+    raise FileNotFoundError(errno.ENOENT, message, str(resolved))
 
 
 def memory_snapshot(torch_module: Any | None) -> dict[str, Any]:
@@ -164,13 +261,45 @@ def quantization_plan() -> dict[str, Any]:
 
 
 def append_error(report: dict[str, Any], stage: str, exc: BaseException) -> None:
+    traceback_text = traceback.format_exc()
+    error = {
+        "stage": stage,
+        "error_type": type(exc).__name__,
+        "error_truncated": truncate(exc),
+        "traceback_tail": traceback_text.splitlines()[-24:],
+    }
+    if isinstance(exc, FileNotFoundError):
+        filename = getattr(exc, "filename", None)
+        resolved_path = str(Path(filename).expanduser().resolve(strict=False)) if filename else ""
+        error.update(
+            {
+                "missing_path": str(filename or ""),
+                "resolved_path": resolved_path,
+                "cwd": os.getcwd(),
+                "probe_file": str(Path(__file__).resolve()),
+                "loader_entrypoint": LOADER_ENTRYPOINT,
+                "exception_errno": getattr(exc, "errno", None),
+                "exception_filename": str(filename or ""),
+                "exception_message": str(exc),
+                "traceback": traceback_text,
+            }
+        )
+        report.update(
+            {
+                "missing_path": str(filename or ""),
+                "resolved_path": resolved_path,
+                "cwd": os.getcwd(),
+                "probe_file": str(Path(__file__).resolve()),
+                "loader_entrypoint": LOADER_ENTRYPOINT,
+                "exception_errno": getattr(exc, "errno", None),
+                "exception_filename": str(filename or ""),
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+                "traceback": traceback_text,
+            }
+        )
     report.setdefault("errors", []).append(
-        {
-            "stage": stage,
-            "error_type": type(exc).__name__,
-            "error_truncated": truncate(exc),
-            "traceback_tail": traceback.format_exc().splitlines()[-24:],
-        }
+        error
     )
 
 
@@ -395,10 +524,15 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
 
         emit_stage("wan_load_started")
         load_started = time.monotonic()
+        add_loader_preflight(report, args)
         if not args.wan_repo_dir.exists():
-            raise FileNotFoundError(f"Wan repo not found: {args.wan_repo_dir}")
+            raise_missing_path(args.wan_repo_dir, "Wan repo not found")
         if not args.model_dir.exists():
-            raise FileNotFoundError(f"Wan model dir not found: {args.model_dir}")
+            raise_missing_path(args.model_dir, "Wan model dir not found")
+        for relative_path in LOADER_REQUIRED_RELATIVE_PATHS:
+            required_path = args.wan_repo_dir / relative_path
+            if not required_path.exists():
+                raise_missing_path(required_path, f"Wan loader required path not found: {relative_path}")
 
         from app.wan22_s2v_generate_wrapper import (
             RUNTIME_PATCH_REPORT,
@@ -585,11 +719,42 @@ def run_mock_tests() -> int:
     with tempfile.TemporaryDirectory(prefix="ayl_fp8_wan_gate0_tests_") as tmpdir:
         tmp = Path(tmpdir)
 
+        missing_root_report = tmp / "mock_missing_root.json"
+        missing_root = run_mock_subprocess("wan_missing_root", missing_root_report)
+        assert missing_root.returncode != 0, missing_root.stdout + missing_root.stderr
+        missing_root_json = json.loads(missing_root_report.read_text(encoding="utf-8"))
+        assert missing_root_json["failure_stage"] == "wan_load", missing_root_json
+        assert missing_root_json["missing_path"], missing_root_json
+        assert missing_root_json["resolved_path"], missing_root_json
+        assert missing_root_json["exception_type"] == "FileNotFoundError", missing_root_json
+        print("wan_load_missing_root: PASS", flush=True)
+
+        missing_checkpoint_report = tmp / "mock_missing_checkpoint.json"
+        missing_checkpoint = run_mock_subprocess("wan_missing_checkpoint", missing_checkpoint_report)
+        assert missing_checkpoint.returncode != 0, missing_checkpoint.stdout + missing_checkpoint.stderr
+        missing_checkpoint_json = json.loads(missing_checkpoint_report.read_text(encoding="utf-8"))
+        assert missing_checkpoint_json["failure_stage"] == "wan_load", missing_checkpoint_json
+        assert missing_checkpoint_json["missing_path"], missing_checkpoint_json
+        assert missing_checkpoint_json["resolved_path"], missing_checkpoint_json
+        assert missing_checkpoint_json["exception_type"] == "FileNotFoundError", missing_checkpoint_json
+        print("wan_load_missing_checkpoint: PASS", flush=True)
+
+        missing_config_report = tmp / "mock_missing_config.json"
+        missing_config = run_mock_subprocess("wan_missing_config", missing_config_report)
+        assert missing_config.returncode != 0, missing_config.stdout + missing_config.stderr
+        missing_config_json = json.loads(missing_config_report.read_text(encoding="utf-8"))
+        assert missing_config_json["failure_stage"] == "wan_load", missing_config_json
+        assert missing_config_json["missing_path"], missing_config_json
+        assert missing_config_json["resolved_path"], missing_config_json
+        assert missing_config_json["exception_type"] == "FileNotFoundError", missing_config_json
+        print("wan_load_missing_config: PASS", flush=True)
+
         success_report = tmp / "mock_success.json"
         success = run_mock_subprocess("success", success_report)
         assert success.returncode == 0, success.stdout + success.stderr
         success_json = json.loads(success_report.read_text(encoding="utf-8"))
         assert success_json["runtime_certification"] == "PASS", success_json
+        assert success_json["wan_load"]["status"] == "succeeded", success_json
         for marker in (
             "bootstrap_started",
             "wan_load_started",
@@ -600,7 +765,7 @@ def run_mock_tests() -> int:
             "first_inference_finished",
         ):
             assert marker in success.stdout, success.stdout
-        print("fp8_wan_gate0_mock_success: PASS", flush=True)
+        print("wan_load_mock_success: PASS", flush=True)
 
         quant_report = tmp / "mock_quant_fail.json"
         quant = run_mock_subprocess("quantization_failure", quant_report)
@@ -627,6 +792,38 @@ def run_mock_gate0(args: argparse.Namespace) -> dict[str, Any]:
     report["memory"]["cuda_memory_before"] = {"allocated_gb": 1.0, "reserved_gb": 2.0, "peak_allocated_gb": 1.0}
     emit_stage("cuda_memory_before", allocated=1.0, reserved=2.0)
     emit_stage("wan_load_started")
+    report["wan_load_preflight"] = {
+        "cwd": os.getcwd(),
+        "path_cwd": str(Path.cwd()),
+        "probe_file": str(Path(__file__).resolve()),
+        "loader_entrypoint": LOADER_ENTRYPOINT,
+        "environment_variables": relevant_env_snapshot(),
+        "path_checks": [],
+        "tree_inventory": {},
+    }
+    missing_path_by_stage = {
+        "wan_missing_root": Path("/mock/missing/Wan2.2"),
+        "wan_missing_checkpoint": Path("/mock/missing/Wan2.2-S2V-14B"),
+        "wan_missing_config": Path("/mock/Wan2.2/wan/configs/__init__.py"),
+    }
+    if args.mock_stage in missing_path_by_stage:
+        try:
+            raise_missing_path(missing_path_by_stage[args.mock_stage], f"Mock missing path for {args.mock_stage}")
+        except FileNotFoundError as exc:
+            report["status"] = "failed"
+            report["failure_stage"] = "wan_load"
+            append_error(report, "wan_load", exc)
+        report["memory"]["cuda_memory_after_cleanup"] = {"allocated_gb": 0.0, "reserved_gb": 0.0, "peak_allocated_gb": 1.0}
+        report["cleanup"] = {"cleanup_seconds": 0.1, "cuda_memory_after_cleanup": report["memory"]["cuda_memory_after_cleanup"]}
+        emit_stage("cuda_memory_after_cleanup", allocated=0.0, reserved=0.0, peak=1.0)
+        report["timings"]["runtime_seconds"] = stage_seconds(started)
+        report["runtime_certification"] = "FAIL"
+        emit_stage("runtime_certification=FAIL", failure_stage="wan_load", exception_type="FileNotFoundError")
+        write_json(args.report_path, report)
+        emit_stage("report_written", report=args.report_path)
+        emit_stage("probe_exit", exit_code=1)
+        return report
+
     report["wan_load"] = {"status": "succeeded", "objects_present": ["t5", "vae", "wav2vec", "noise_model"]}
     report["timings"]["load_seconds"] = 0.1
     report["memory"]["cuda_memory_after_load"] = {"allocated_gb": 40.0, "reserved_gb": 42.0, "peak_allocated_gb": 40.0}
