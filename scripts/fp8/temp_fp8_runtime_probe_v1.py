@@ -5,7 +5,9 @@ import glob
 import json
 import os
 import platform
+import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from datetime import datetime, timezone
@@ -18,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPORT_PATH = REPO_ROOT / "logs" / "fp8_runtime_probe_v1.json"
 DEFAULT_CERTIFICATION_PATH = REPO_ROOT / "logs" / "fp8_runtime_certification_v1.json"
 TORCHAO_EXTENSION_PATTERNS = ("_C_cutlass_90a*.so", "_C_mxfp8*.so")
+SENSITIVE_ENV_TOKENS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL")
 
 
 def now_iso() -> str:
@@ -27,6 +30,45 @@ def now_iso() -> str:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def emit_stage(stage: str, **values: Any) -> None:
+    suffix = "".join(f" {key}={value}" for key, value in values.items() if value is not None and value != "")
+    print(f"[{SCRIPT_ID}] {stage}{suffix}", flush=True)
+
+
+def safe_environment_summary() -> dict[str, Any]:
+    keys = [key for key in sorted(os.environ) if key.startswith("AYL_") or key in {"PYTHONUNBUFFERED", "TORCH_CUDA_ARCH_LIST"}]
+    safe = {}
+    for key in keys:
+        if any(token in key.upper() for token in SENSITIVE_ENV_TOKENS):
+            safe[key] = "<redacted>"
+        else:
+            safe[key] = os.environ.get(key, "")[:500]
+    return safe
+
+
+def append_error(report: dict[str, Any], stage: str, exc: BaseException) -> None:
+    report.setdefault("errors", []).append(
+        {
+            "phase": stage,
+            "failure_stage": stage,
+            "error_type": type(exc).__name__,
+            "exception_type": type(exc).__name__,
+            "error_truncated": str(exc)[:1000],
+            "exception_message": str(exc)[:1000],
+            "traceback": traceback.format_exc().splitlines(),
+        }
+    )
+
+
+def mark_failure(report: dict[str, Any], stage: str, exc: BaseException) -> dict[str, Any]:
+    report["status"] = f"failed_{stage}"
+    report["failure_stage"] = stage
+    report["exception_type"] = type(exc).__name__
+    report["exception_message"] = str(exc)[:1000]
+    append_error(report, stage, exc)
+    return report
 
 
 def module_version(module: Any) -> str:
@@ -184,7 +226,7 @@ def module_inventory(module: Any, torch_module: Any) -> dict[str, Any]:
     }
 
 
-def import_torchao_apis() -> dict[str, Any]:
+def import_torchao_apis(*, mock_stage: str = "") -> dict[str, Any]:
     result: dict[str, Any] = {
         "torchao_import_status": "not_started",
         "torchao_version": "",
@@ -197,12 +239,21 @@ def import_torchao_apis() -> dict[str, Any]:
         "traceback": [],
     }
     try:
+        emit_stage("torchao_import_started")
+        if mock_stage == "torchao_import":
+            raise ModuleNotFoundError("mock torchao import failure")
         import torchao
 
         result["torchao_import_status"] = "ok"
         result["torchao_version"] = module_version(torchao)
         result["torchao_file"] = module_file(torchao)
+        emit_stage("torchao_import_passed", version=result["torchao_version"])
+        emit_stage("extension_load_started")
+        if mock_stage == "extension_load":
+            raise RuntimeError("mock TorchAO extension load failure")
         result["extension_probe"] = torchao_extension_probe(torchao)
+        extension_status = "passed" if result["extension_probe"].get("all_required_extensions_loadable") else "failed"
+        emit_stage("extension_load_passed" if extension_status == "passed" else "extension_load_failed")
     except Exception as exc:
         result.update(
             {
@@ -355,14 +406,14 @@ def certification_from_report(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run_probe(report_path: Path, certification_path: Path) -> dict[str, Any]:
-    started = time.monotonic()
-    report: dict[str, Any] = {
+def build_initial_report(report_path: Path, certification_path: Path) -> dict[str, Any]:
+    return {
         "script_id": SCRIPT_ID,
         "status": "started",
         "created_at": now_iso(),
         "report_path": str(report_path),
         "certification_path": str(certification_path),
+        "safe_environment": safe_environment_summary(),
         "scope": runtime_scope(),
         "runtime": runtime_info(None),
         "gpu": {},
@@ -388,9 +439,80 @@ def run_probe(report_path: Path, certification_path: Path) -> dict[str, Any]:
         "runtime_certification": "FAIL",
     }
 
+
+def run_probe(report_path: Path, certification_path: Path, *, mock_stage: str = "") -> dict[str, Any]:
+    started = time.monotonic()
+    report: dict[str, Any] = build_initial_report(report_path, certification_path)
+
+    if mock_stage in {"torchao_import", "extension_load", "success"}:
+        report["torch"] = {
+            "import_status": "ok",
+            "version": "mock-torch",
+            "cuda_version": "mock-cuda",
+            "cuda_available": True,
+            "cuda_device_count": 1,
+            "float8_e4m3fn_available": True,
+            "float8_e5m2_available": True,
+        }
+        report["runtime"] = {
+            **runtime_info(None),
+            "torch_version": "mock-torch",
+            "torch_cuda_version": "mock-cuda",
+            "torchao_version": "mock-torchao",
+            "cuda_is_available": True,
+            "cuda_device_count": 1,
+        }
+        emit_stage("torch_import_started")
+        emit_stage("torch_import_passed", version="mock-torch")
+        emit_stage("torchao_import_started")
+        if mock_stage == "torchao_import":
+            try:
+                raise ModuleNotFoundError("mock torchao import failure")
+            except Exception as exc:
+                report["torchao"] = {"import_status": "failed", "version": ""}
+                mark_failure(report, "torchao_import", exc)
+                return finalize_report(report, report_path, certification_path, started, None)
+        report["torchao"] = {"import_status": "ok", "version": "mock-torchao", "file": "mock"}
+        report["apis"] = {
+            "torchao_import_status": "ok",
+            "torchao_version": "mock-torchao",
+            "quantize_import_status": "ok",
+            "float8_config_import_status": "ok",
+            "quantize_available": True,
+            "float8_weight_only_config_available": True,
+        }
+        emit_stage("torchao_import_passed", version="mock-torchao")
+        emit_stage("extension_load_started")
+        if mock_stage == "extension_load":
+            try:
+                raise RuntimeError("mock TorchAO extension load failure")
+            except Exception as exc:
+                report["apis"]["extension_probe"] = {"all_required_extensions_loadable": False, "mocked": True}
+                mark_failure(report, "extension_load", exc)
+                return finalize_report(report, report_path, certification_path, started, None)
+        emit_stage("extension_load_passed")
+        emit_stage("quantization_test_started")
+        report["gpu"] = {"cuda_available": True, "device_name": "mock Blackwell", "mocked": True}
+        report["cuda"] = {"mocked": True}
+        report["inventory_before_quantization"] = {"nn_linear_count": 1, "mocked": True}
+        report["inventory_after_quantization"] = {"nn_linear_count": 1, "mocked": True}
+        report["module_tree_check"] = {
+            "nn_linear_still_nn_linear": True,
+            "named_modules_preserved": True,
+            "mocked": True,
+        }
+        report["weight_change_check"] = {"weight_object_changed": True, "mocked": True}
+        report["quantization_result"] = {"status": "succeeded", "mocked": True}
+        report["apis"]["extension_probe"] = {"all_required_extensions_loadable": True, "mocked": True}
+        report["status"] = "succeeded"
+        return finalize_report(report, report_path, certification_path, started, None)
+
     torch = None
     linear = None
     try:
+        emit_stage("torch_import_started")
+        if mock_stage == "torch_import":
+            raise ModuleNotFoundError("mock torch import failure")
         import torch as torch_module
 
         torch = torch_module
@@ -403,21 +525,14 @@ def run_probe(report_path: Path, certification_path: Path) -> dict[str, Any]:
             "float8_e4m3fn_available": hasattr(torch, "float8_e4m3fn"),
             "float8_e5m2_available": hasattr(torch, "float8_e5m2"),
         }
+        emit_stage("torch_import_passed", version=report["torch"]["version"])
         report["runtime"] = runtime_info(torch)
         report["cuda"] = cuda_backend_info(torch)
     except Exception as exc:
-        report["status"] = "failed_import_torch"
-        report["errors"].append(
-            {
-                "phase": "import_torch",
-                "error_type": type(exc).__name__,
-                "error_truncated": str(exc)[:1000],
-                "traceback": traceback.format_exc().splitlines(),
-            }
-        )
+        mark_failure(report, "torch_import", exc)
         return finalize_report(report, report_path, certification_path, started, torch)
 
-    apis = import_torchao_apis()
+    apis = import_torchao_apis(mock_stage=mock_stage)
     quantize = apis.pop("_quantize", None)
     float8_config = apis.pop("_float8_config", None)
     report["torchao"] = {
@@ -441,9 +556,27 @@ def run_probe(report_path: Path, certification_path: Path) -> dict[str, Any]:
 
     if not apis.get("quantize_available") or not apis.get("float8_weight_only_config_available"):
         report["status"] = "blocked_torchao_fp8_api_unavailable"
+        report["failure_stage"] = "torchao_api"
         return finalize_report(report, report_path, certification_path, started, torch)
 
     try:
+        emit_stage("quantization_test_started")
+        if mock_stage == "success":
+            report["gpu"] = {"cuda_available": True, "mocked": True}
+            report["cuda"] = {"mocked": True}
+            report["inventory_before_quantization"] = {"nn_linear_count": 1, "mocked": True}
+            report["inventory_after_quantization"] = {"nn_linear_count": 1, "mocked": True}
+            report["module_tree_check"] = {
+                "nn_linear_still_nn_linear": True,
+                "named_modules_preserved": True,
+                "mocked": True,
+            }
+            report["weight_change_check"] = {"weight_object_changed": True, "mocked": True}
+            report["quantization_result"] = {"status": "succeeded", "mocked": True}
+            report["apis"]["extension_probe"] = {"all_required_extensions_loadable": True, "mocked": True}
+            report["runtime"].update({"cuda_is_available": True, "cuda_device_count": 1})
+            report["status"] = "succeeded"
+            return finalize_report(report, report_path, certification_path, started, torch)
         create_started = time.monotonic()
         linear = torch.nn.Linear(4096, 4096, bias=True, device="cuda").to(dtype=torch.bfloat16)
         torch.cuda.synchronize()
@@ -501,14 +634,8 @@ def run_probe(report_path: Path, certification_path: Path) -> dict[str, Any]:
         report["status"] = "succeeded"
     except Exception as exc:
         report["status"] = "failed_quantization_probe"
-        report["errors"].append(
-            {
-                "phase": "quantize_linear",
-                "error_type": type(exc).__name__,
-                "error_truncated": str(exc)[:1000],
-                "traceback": traceback.format_exc().splitlines(),
-            }
-        )
+        report["failure_stage"] = "quantization_test"
+        append_error(report, "quantization_test", exc)
     finally:
         cleanup_started = time.monotonic()
         try:
@@ -538,31 +665,40 @@ def finalize_report(
     report["runtime_seconds"] = round(time.monotonic() - started, 6)
     certification = certification_from_report(report)
     report.update(certification)
-    write_json(report_path, report)
-    write_json(
-        certification_path,
-        {
-            "script_id": SCRIPT_ID,
-            "created_at": now_iso(),
-            "runtime_certification": certification["runtime_certification"],
-            "objective_reason": certification["objective_reason"],
-            "checks": certification["checks"],
-            "failed_checks": certification["failed_checks"],
-            "status": report.get("status"),
-            "runtime": report.get("runtime", {}),
-            "gpu": report.get("gpu", {}),
-            "cuda": report.get("cuda", {}),
-            "torchao": report.get("torchao", {}),
-            "apis": report.get("apis", {}),
-            "quantization_result": report.get("quantization_result", {}),
-            "module_tree_check": report.get("module_tree_check", {}),
-            "weight_change_check": report.get("weight_change_check", {}),
-            "memory": report.get("memory", {}),
-            "timings": report.get("timings", {}),
-            "errors": report.get("errors", []),
-            "scope": report.get("scope", {}),
-        },
-    )
+    emit_stage("runtime_certification=" + certification["runtime_certification"])
+    try:
+        write_json(report_path, report)
+        write_json(
+            certification_path,
+            {
+                "script_id": SCRIPT_ID,
+                "created_at": now_iso(),
+                "runtime_certification": certification["runtime_certification"],
+                "objective_reason": certification["objective_reason"],
+                "checks": certification["checks"],
+                "failed_checks": certification["failed_checks"],
+                "status": report.get("status"),
+                "failure_stage": report.get("failure_stage", ""),
+                "exception_type": report.get("exception_type", ""),
+                "exception_message": report.get("exception_message", ""),
+                "runtime": report.get("runtime", {}),
+                "gpu": report.get("gpu", {}),
+                "cuda": report.get("cuda", {}),
+                "torchao": report.get("torchao", {}),
+                "apis": report.get("apis", {}),
+                "quantization_result": report.get("quantization_result", {}),
+                "module_tree_check": report.get("module_tree_check", {}),
+                "weight_change_check": report.get("weight_change_check", {}),
+                "memory": report.get("memory", {}),
+                "timings": report.get("timings", {}),
+                "errors": report.get("errors", []),
+                "scope": report.get("scope", {}),
+            },
+        )
+        emit_stage("report_written", report=report_path, certification=certification_path)
+    except Exception as exc:
+        emit_stage("report_write_failed", exception_type=type(exc).__name__, error=str(exc)[:500])
+        raise
     return report
 
 
@@ -580,21 +716,121 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("AYL_FP8_CERTIFICATION_REPORT_PATH", str(DEFAULT_CERTIFICATION_PATH)),
         help="Path for fp8_runtime_certification_v1.json.",
     )
+    parser.add_argument("--mock-stage", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--run-mock-tests", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
+def run_probe_subprocess(stage: str, report_path: Path, certification_path: Path) -> subprocess.CompletedProcess[str]:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--mock-stage",
+        stage,
+        "--report-path",
+        str(report_path),
+        "--certification-path",
+        str(certification_path),
+    ]
+    return subprocess.run(command, text=True, capture_output=True, check=False, timeout=30)
+
+
+def read_json_if_exists(path: Path) -> dict[str, Any]:
+    if not path.exists() or not path.is_file():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def announce_test(name: str) -> None:
+    print(f"{name}: PASS", flush=True)
+
+
+def run_mock_tests() -> int:
+    with tempfile.TemporaryDirectory(prefix="ayl_fp8_probe_tests_") as tmpdir:
+        tmp = Path(tmpdir)
+
+        bootstrap_report = tmp / "bootstrap_report.json"
+        bootstrap_cert = tmp / "bootstrap_cert.json"
+        bootstrap = run_probe_subprocess("torch_import", bootstrap_report, bootstrap_cert)
+        assert "[TEMP_FP8_RUNTIME_PROBE_V1] bootstrap_started" in bootstrap.stdout, bootstrap.stdout
+        assert bootstrap.stdout.index("bootstrap_started") < bootstrap.stdout.index("torch_import_started"), bootstrap.stdout
+        announce_test("fp8_probe_bootstrap_before_imports")
+
+        torch_report = read_json_if_exists(bootstrap_report)
+        assert bootstrap.returncode != 0, bootstrap.stdout
+        assert torch_report.get("runtime_certification") == "FAIL", torch_report
+        assert torch_report.get("failure_stage") == "torch_import", torch_report
+        assert "runtime_certification=FAIL" in bootstrap.stdout, bootstrap.stdout
+        announce_test("fp8_probe_torch_import_failure_writes_report")
+
+        torchao_report_path = tmp / "torchao_report.json"
+        torchao_cert_path = tmp / "torchao_cert.json"
+        torchao = run_probe_subprocess("torchao_import", torchao_report_path, torchao_cert_path)
+        torchao_report = read_json_if_exists(torchao_report_path)
+        assert torchao.returncode != 0, torchao.stdout
+        assert torchao_report.get("runtime_certification") == "FAIL", torchao_report
+        assert torchao_report.get("failure_stage") == "torchao_import", torchao_report
+        announce_test("fp8_probe_torchao_import_failure_writes_report")
+
+        extension_report_path = tmp / "extension_report.json"
+        extension_cert_path = tmp / "extension_cert.json"
+        extension = run_probe_subprocess("extension_load", extension_report_path, extension_cert_path)
+        extension_report = read_json_if_exists(extension_report_path)
+        assert extension.returncode != 0, extension.stdout
+        assert extension_report.get("runtime_certification") == "FAIL", extension_report
+        assert extension_report.get("failure_stage") == "extension_load", extension_report
+        announce_test("fp8_probe_extension_failure_writes_report")
+
+        success_report_path = tmp / "success_report.json"
+        success_cert_path = tmp / "success_cert.json"
+        success = run_probe_subprocess("success", success_report_path, success_cert_path)
+        success_report = read_json_if_exists(success_report_path)
+        assert success.returncode == 0, success.stdout
+        assert success_report.get("runtime_certification") == "PASS", success_report
+        assert "report_written" in success.stdout, success.stdout
+        announce_test("fp8_probe_mock_success_writes_pass_report")
+
+        write_fail_target = tmp / "report_dir"
+        write_fail_target.mkdir()
+        write_fail_cert = tmp / "write_fail_cert.json"
+        write_fail = run_probe_subprocess("success", write_fail_target, write_fail_cert)
+        assert write_fail.returncode != 0, write_fail.stdout
+        assert "report_write_failed" in write_fail.stdout, write_fail.stdout
+        assert "unhandled_exception" in write_fail.stdout, write_fail.stdout
+        announce_test("fp8_probe_report_write_failure_visible")
+
+    return 0
+
+
 def main() -> int:
+    emit_stage("bootstrap_started")
     args = parse_args()
+    if args.run_mock_tests:
+        return run_mock_tests()
     report_path = Path(args.report_path).expanduser().resolve()
     certification_path = Path(args.certification_path).expanduser().resolve()
-    report = run_probe(report_path, certification_path)
-    print(
-        f"[{SCRIPT_ID}] status={report.get('status')} "
-        f"runtime_certification={report.get('runtime_certification')} "
-        f"report={report_path} certification={certification_path}",
-        flush=True,
-    )
-    return 0 if report.get("runtime_certification") == "PASS" else 1
+    emit_stage("python_environment_ready", executable=sys.executable, cwd=Path.cwd())
+    try:
+        report = run_probe(report_path, certification_path, mock_stage=args.mock_stage)
+        print(
+            f"[{SCRIPT_ID}] status={report.get('status')} "
+            f"runtime_certification={report.get('runtime_certification')} "
+            f"report={report_path} certification={certification_path}",
+            flush=True,
+        )
+        emit_stage("probe_exit", exit_code=0 if report.get("runtime_certification") == "PASS" else 1)
+        return 0 if report.get("runtime_certification") == "PASS" else 1
+    except Exception as exc:
+        emit_stage("unhandled_exception", exception_type=type(exc).__name__, error=str(exc)[:500])
+        print(traceback.format_exc(), flush=True)
+        report = build_initial_report(report_path, certification_path)
+        mark_failure(report, "unhandled_exception", exc)
+        try:
+            finalize_report(report, report_path, certification_path, time.monotonic(), None)
+        except Exception:
+            pass
+        emit_stage("probe_exit", exit_code=1)
+        return 1
 
 
 if __name__ == "__main__":
