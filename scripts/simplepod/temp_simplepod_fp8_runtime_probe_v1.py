@@ -19,11 +19,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_fp8_runtime_probe_v1.json"
 CONTAINER_LOG_PATH = REPO_ROOT / "logs" / "simplepod_fp8_runtime_probe_container.log"
 
-IMAGE_TAG = "0.3.01-blackwell-fp8-runtime-probe-v2"
+IMAGE_TAG = "0.3.03-blackwell-fp8-wan-gate0-diagnostics-v2"
 IMAGE_REF = f"ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:{IMAGE_TAG}"
 DATACENTER = "EU-PL-01"
 MIN_GPU_MEMORY_MB = 48_000
-PROBE_REPORT_PATH = "/tmp/fp8_runtime_probe_v1.json"
+PROBE_REPORT_PATH = "/tmp/fp8_wan_gate0_probe_v1.json"
 CERTIFICATION_REPORT_PATH = "/tmp/fp8_runtime_certification_v1.json"
 
 MARKET_LIST_PATH = "/instances/market/list"
@@ -94,8 +94,13 @@ REPORT_MARKERS = (
     "Float8WeightOnlyConfig",
     "TEMP_FP8_RUNTIME_PROBE_V1",
     "[TEMP_FP8_RUNTIME_PROBE_V1]",
+    "TEMP_FP8_WAN_GATE0_PROBE_V1",
+    "[TEMP_FP8_WAN_GATE0_PROBE_V1]",
+    "probe_build_id",
+    "report_schema_version",
     "fp8_runtime_probe_v1",
     "fp8_runtime_certification_v1",
+    "fp8_wan_gate0_probe_v1",
     "torchao",
     "quantize_",
 )
@@ -113,6 +118,21 @@ ERROR_MARKERS = (
     "Float8WeightOnlyConfig",
 )
 
+STRUCTURED_LOG_FIELDS = (
+    "probe_build_id",
+    "report_schema_version",
+    "failure_stage",
+    "exception_type",
+    "exception_message",
+    "missing_path",
+    "resolved_path",
+    "exception_filename",
+    "exception_errno",
+    "cwd",
+    "probe_file",
+    "loader_entrypoint",
+)
+
 STARTUP_PULL_MARKERS = (
     "Download starting",
     "Preparing instance",
@@ -126,6 +146,7 @@ STARTUP_READY_MARKERS = (
     "Running",
     "Ready",
     "[TEMP_FP8_RUNTIME_PROBE_V1]",
+    "[TEMP_FP8_WAN_GATE0_PROBE_V1]",
 )
 
 IMAGE_PULL_ERROR_MARKERS = (
@@ -653,7 +674,7 @@ def classify_startup(detail_json) -> dict:
     text_lower = text.lower()
     matched_probe_markers = [
         marker
-        for marker in ("[TEMP_FP8_RUNTIME_PROBE_V1]", "runtime_certification")
+        for marker in ("[TEMP_FP8_RUNTIME_PROBE_V1]", "[TEMP_FP8_WAN_GATE0_PROBE_V1]", "runtime_certification", "probe_build_id", "report_schema_version")
         if marker in text or marker in text_lower
     ]
     matched_running_markers = [
@@ -840,6 +861,24 @@ def parse_runtime_certification_from_text(text: str) -> str:
     return ""
 
 
+def parse_structured_probe_fields_from_text(text: str) -> dict:
+    fields = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("[TEMP_FP8_"):
+            continue
+        try:
+            _, payload = stripped.split("]", 1)
+        except ValueError:
+            continue
+        payload = payload.strip()
+        for key in STRUCTURED_LOG_FIELDS:
+            prefix = f"{key}="
+            if payload.startswith(prefix):
+                fields[key] = payload[len(prefix):]
+    return fields
+
+
 def find_fp8_report_in_text(text: str):
     for line in text.splitlines():
         parsed = maybe_json_from_string(line)
@@ -878,6 +917,7 @@ def analyze_container_log_text(text: str) -> dict:
         if "Failed to load" in line and ("torchao" in line or "_C_cutlass_90a" in line or "_C_mxfp8" in line):
             torchao_extension_load_errors.append(truncate(line.strip(), 1200))
     runtime_certification = parse_runtime_certification_from_text(text)
+    structured_probe_fields = parse_structured_probe_fields_from_text(text)
     status_value = ""
     for line in text.splitlines():
         stripped = line.strip()
@@ -895,6 +935,7 @@ def analyze_container_log_text(text: str) -> dict:
         "torchao_extension_load_errors": torchao_extension_load_errors,
         "runtime_certification_detected_from_logs": bool(runtime_certification),
         "runtime_certification_value": runtime_certification,
+        "structured_probe_fields": structured_probe_fields,
         "status_line_truncated": status_value,
         "traceback_tail": traceback_tail,
         "contains_pass": "PASS" in text,
@@ -983,6 +1024,7 @@ def decoded_field_by_name(text_fields: list[dict], name: str) -> str:
 def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
     fp8_report = data.get("fp8_runtime_report")
     fp8_summary = summarize_fp8_report(fp8_report)
+    structured_probe_fields = data.get("structured_probe_fields") or {}
     selected = data.get("market_selection", {}).get("selected", {})
     selected_summary = selected.get("selected_summary", {})
     return {
@@ -1045,6 +1087,19 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
         "final_decoded_console": data.get("final_decoded_console", ""),
         "runtime_certification_detected_from_logs": data.get("runtime_certification_detected_from_logs", False),
         "runtime_certification_value": data.get("runtime_certification_value", ""),
+        "structured_probe_fields": structured_probe_fields,
+        "probe_build_id": structured_probe_fields.get("probe_build_id") or data.get("probe_build_id"),
+        "report_schema_version": structured_probe_fields.get("report_schema_version") or data.get("report_schema_version"),
+        "failure_stage": structured_probe_fields.get("failure_stage") or data.get("failure_stage"),
+        "exception_type": structured_probe_fields.get("exception_type") or data.get("exception_type"),
+        "exception_message": structured_probe_fields.get("exception_message") or data.get("exception_message"),
+        "missing_path": structured_probe_fields.get("missing_path") or data.get("missing_path"),
+        "resolved_path": structured_probe_fields.get("resolved_path") or data.get("resolved_path"),
+        "exception_filename": structured_probe_fields.get("exception_filename") or data.get("exception_filename"),
+        "exception_errno": structured_probe_fields.get("exception_errno") or data.get("exception_errno"),
+        "cwd": structured_probe_fields.get("cwd") or data.get("cwd"),
+        "probe_file": structured_probe_fields.get("probe_file") or data.get("probe_file"),
+        "loader_entrypoint": structured_probe_fields.get("loader_entrypoint") or data.get("loader_entrypoint"),
         "original_status": data.get("original_status", ""),
         "fp8_runtime_summary": fp8_summary,
         "fp8_runtime_report": fp8_report,
@@ -1222,6 +1277,7 @@ def monitor_probe(
     explicit_failure_seen = False
     matched_failure_markers = []
     latest_log_collection = {}
+    latest_structured_probe_fields = {}
     latest_detail_json = None
     latest_status_fields = []
     polls = 0
@@ -1234,6 +1290,7 @@ def monitor_probe(
         report = find_fp8_report(detail_json)
         log_collection = collect_container_logs(base_url, api_key, instance_id, detail_json)
         latest_log_collection = log_collection
+        latest_structured_probe_fields = dict(log_collection.get("structured_probe_fields") or {})
         if log_collection.get("fp8_runtime_report_from_logs") is not None and report is None:
             report = log_collection.get("fp8_runtime_report_from_logs")
         log_certification = str(log_collection.get("runtime_certification_value") or "").upper()
@@ -1361,6 +1418,7 @@ def monitor_probe(
         "runtime_certification_detected": runtime_certification_detected,
         "runtime_certification_value": runtime_certification_value,
         "matched_failure_markers": matched_failure_markers,
+        "structured_probe_fields": latest_structured_probe_fields,
         "logs_endpoint_unavailable_seen": logs_endpoint_unavailable_seen,
         "report_channel_unavailable_seen": report_channel_unavailable_seen,
         "latest_log_collection": latest_log_collection,
@@ -1721,6 +1779,54 @@ def run_mock_tests() -> int:
         assert result["status"] == "runtime_certification_failed", result
         assert result["runtime_certification_value"] == "FAIL", result
         announce("probe_monitor_explicit_fail")
+
+        gate0_fail_log = "\n".join(
+            [
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] probe_build_id=gate0-diagnostics-v2",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] report_schema_version=fp8-wan-gate0-v2",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] failure_stage=wan_load",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] exception_type=FileNotFoundError",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] exception_message=[Errno 2] Wan model dir not found: '/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B'",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] missing_path=/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] resolved_path=/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] exception_filename=/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] exception_errno=2",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] cwd=/opt/ayl-simplepod-wan22-s2v-fp8-runtime-probe",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] probe_file=/opt/ayl-simplepod-wan22-s2v-fp8-runtime-probe/temp_fp8_wan_gate0_probe_v1.py",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] loader_entrypoint=wan.speech2video.WanS2V",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] runtime_certification=FAIL",
+            ]
+        )
+        result, _calls = run_monitor_mock([running_empty], [gate0_fail_log])
+        assert result["status"] == "runtime_certification_failed", result
+        assert result["runtime_certification_value"] == "FAIL", result
+        assert result["structured_probe_fields"]["probe_build_id"] == "gate0-diagnostics-v2", result
+        assert result["structured_probe_fields"]["missing_path"] == "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B", result
+        mock_args = argparse.Namespace(
+            execute=True,
+            template_id=26108,
+            startup_timeout_seconds=1200,
+            probe_timeout_seconds=300,
+            instance_market="",
+            confirm_delete=True,
+        )
+        recovered_report = build_report(
+            mock_args,
+            "failed_recovered_from_container_logs",
+            {
+                "structured_probe_fields": result["structured_probe_fields"],
+                "runtime_certification_detected_from_logs": True,
+                "runtime_certification_value": "FAIL",
+            },
+        )
+        assert recovered_report["probe_build_id"] == "gate0-diagnostics-v2", recovered_report
+        assert recovered_report["report_schema_version"] == "fp8-wan-gate0-v2", recovered_report
+        assert recovered_report["failure_stage"] == "wan_load", recovered_report
+        assert recovered_report["exception_type"] == "FileNotFoundError", recovered_report
+        assert recovered_report["exception_message"], recovered_report
+        assert recovered_report["missing_path"] == "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B", recovered_report
+        assert recovered_report["resolved_path"] == "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B", recovered_report
+        announce("probe_monitor_gate0_structured_failure_fields_preserved")
 
         json_pass = make_mock_instance(
             "running",

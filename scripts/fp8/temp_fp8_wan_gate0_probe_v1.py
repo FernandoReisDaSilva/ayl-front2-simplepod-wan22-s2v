@@ -16,10 +16,12 @@ from typing import Any
 
 
 SCRIPT_ID = "TEMP_FP8_WAN_GATE0_PROBE_V1"
+PROBE_BUILD_ID = "gate0-diagnostics-v2"
+REPORT_SCHEMA_VERSION = "fp8-wan-gate0-v2"
 DEFAULT_REPORT_PATH = Path(os.getenv("AYL_FP8_WAN_GATE0_REPORT_PATH", "/tmp/fp8_wan_gate0_probe_v1.json"))
 DEFAULT_MODEL_DIR = Path(os.getenv("WAN22_S2V_MODEL_DIR", "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B"))
 DEFAULT_WAN_REPO_DIR = Path(os.getenv("WAN22_REPO_DIR", "/opt/Wan2.2"))
-DEFAULT_IMAGE_TAG = os.getenv("AYL_IMAGE_TAG", "0.3.02-blackwell-fp8-wan-gate0-v1")
+DEFAULT_IMAGE_TAG = os.getenv("AYL_IMAGE_TAG", "0.3.03-blackwell-fp8-wan-gate0-diagnostics-v2")
 DEFAULT_WAN_COMMIT = os.getenv("AYL_WAN22_GIT_COMMIT", "42bf4cfaa384bc21833865abc2f9e6c0e67233dc")
 TASK = "s2v-14B"
 MIN_LINEAR_PARAMS = int(os.getenv("AYL_FP8_GATE0_MIN_LINEAR_PARAMS", "16384"))
@@ -180,6 +182,10 @@ def stage_seconds(started: float) -> float:
 def initial_report(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "script_id": SCRIPT_ID,
+        "probe_build_id": PROBE_BUILD_ID,
+        "report_schema_version": REPORT_SCHEMA_VERSION,
+        "probe_script_path": str(Path(__file__).resolve()),
+        "probe_started_at": now_iso(),
         "created_at": now_iso(),
         "status": "started",
         "scope": {
@@ -301,6 +307,23 @@ def append_error(report: dict[str, Any], stage: str, exc: BaseException) -> None
     report.setdefault("errors", []).append(
         error
     )
+
+
+def emit_failure_diagnostics(report: dict[str, Any]) -> None:
+    for key in (
+        "failure_stage",
+        "exception_type",
+        "exception_message",
+        "missing_path",
+        "resolved_path",
+        "exception_filename",
+        "exception_errno",
+        "cwd",
+        "probe_file",
+        "loader_entrypoint",
+    ):
+        if key in report:
+            emit_stage(f"{key}={report.get(key)}")
 
 
 def resolve_wan_config(task: str):
@@ -499,6 +522,8 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
     old_patch_env = os.getenv("AYL_SAFETENSORS_CUDA_TO_CPU_PATCH")
     try:
         emit_stage("bootstrap_started")
+        emit_stage(f"probe_build_id={PROBE_BUILD_ID}")
+        emit_stage(f"report_schema_version={REPORT_SCHEMA_VERSION}")
         if str(args.wan_repo_dir) not in sys.path:
             sys.path.insert(0, str(args.wan_repo_dir))
         if str(Path.cwd()) not in sys.path:
@@ -646,6 +671,7 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
         report["status"] = "failed"
         report["failure_stage"] = current_failure_stage(report)
         append_error(report, report["failure_stage"], exc)
+        emit_failure_diagnostics(report)
         emit_stage("runtime_certification=FAIL", failure_stage=report["failure_stage"], exception_type=type(exc).__name__)
     finally:
         cleanup_started = time.monotonic()
@@ -727,6 +753,7 @@ def run_mock_tests() -> int:
         assert missing_root_json["missing_path"], missing_root_json
         assert missing_root_json["resolved_path"], missing_root_json
         assert missing_root_json["exception_type"] == "FileNotFoundError", missing_root_json
+        assert missing_root_json["exception_message"], missing_root_json
         print("wan_load_missing_root: PASS", flush=True)
 
         missing_checkpoint_report = tmp / "mock_missing_checkpoint.json"
@@ -737,6 +764,7 @@ def run_mock_tests() -> int:
         assert missing_checkpoint_json["missing_path"], missing_checkpoint_json
         assert missing_checkpoint_json["resolved_path"], missing_checkpoint_json
         assert missing_checkpoint_json["exception_type"] == "FileNotFoundError", missing_checkpoint_json
+        assert missing_checkpoint_json["exception_message"], missing_checkpoint_json
         print("wan_load_missing_checkpoint: PASS", flush=True)
 
         missing_config_report = tmp / "mock_missing_config.json"
@@ -747,6 +775,7 @@ def run_mock_tests() -> int:
         assert missing_config_json["missing_path"], missing_config_json
         assert missing_config_json["resolved_path"], missing_config_json
         assert missing_config_json["exception_type"] == "FileNotFoundError", missing_config_json
+        assert missing_config_json["exception_message"], missing_config_json
         print("wan_load_missing_config: PASS", flush=True)
 
         success_report = tmp / "mock_success.json"
@@ -755,8 +784,14 @@ def run_mock_tests() -> int:
         success_json = json.loads(success_report.read_text(encoding="utf-8"))
         assert success_json["runtime_certification"] == "PASS", success_json
         assert success_json["wan_load"]["status"] == "succeeded", success_json
+        assert success_json["probe_build_id"] == PROBE_BUILD_ID, success_json
+        assert success_json["report_schema_version"] == REPORT_SCHEMA_VERSION, success_json
+        assert success_json["probe_script_path"], success_json
+        assert success_json["probe_started_at"], success_json
         for marker in (
             "bootstrap_started",
+            f"probe_build_id={PROBE_BUILD_ID}",
+            f"report_schema_version={REPORT_SCHEMA_VERSION}",
             "wan_load_started",
             "wan_load_finished",
             "fp8_quantization_started",
@@ -789,6 +824,8 @@ def run_mock_gate0(args: argparse.Namespace) -> dict[str, Any]:
     started = time.monotonic()
     report = initial_report(args)
     emit_stage("bootstrap_started")
+    emit_stage(f"probe_build_id={PROBE_BUILD_ID}")
+    emit_stage(f"report_schema_version={REPORT_SCHEMA_VERSION}")
     report["memory"]["cuda_memory_before"] = {"allocated_gb": 1.0, "reserved_gb": 2.0, "peak_allocated_gb": 1.0}
     emit_stage("cuda_memory_before", allocated=1.0, reserved=2.0)
     emit_stage("wan_load_started")
@@ -813,6 +850,7 @@ def run_mock_gate0(args: argparse.Namespace) -> dict[str, Any]:
             report["status"] = "failed"
             report["failure_stage"] = "wan_load"
             append_error(report, "wan_load", exc)
+            emit_failure_diagnostics(report)
         report["memory"]["cuda_memory_after_cleanup"] = {"allocated_gb": 0.0, "reserved_gb": 0.0, "peak_allocated_gb": 1.0}
         report["cleanup"] = {"cleanup_seconds": 0.1, "cuda_memory_after_cleanup": report["memory"]["cuda_memory_after_cleanup"]}
         emit_stage("cuda_memory_after_cleanup", allocated=0.0, reserved=0.0, peak=1.0)
