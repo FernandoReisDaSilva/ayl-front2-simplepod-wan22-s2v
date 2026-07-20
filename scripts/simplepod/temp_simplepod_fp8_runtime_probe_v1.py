@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "logs" / "simplepod_fp8_runtime_probe_v1.json"
 CONTAINER_LOG_PATH = REPO_ROOT / "logs" / "simplepod_fp8_runtime_probe_container.log"
 
-IMAGE_TAG = "0.3.03-blackwell-fp8-wan-gate0-diagnostics-v2"
+IMAGE_TAG = "0.3.04-blackwell-fp8-wan-gate0-mount-audit-v1"
 IMAGE_REF = f"ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:{IMAGE_TAG}"
 DATACENTER = "EU-PL-01"
 MIN_GPU_MEMORY_MB = 48_000
@@ -130,7 +130,15 @@ STRUCTURED_LOG_FIELDS = (
     "exception_errno",
     "cwd",
     "probe_file",
+    "probe_script_path",
     "loader_entrypoint",
+    "environment",
+    "loader_preflight",
+    "path_checks",
+    "detected_mount_points_json",
+    "candidate_model_roots_json",
+    "model_search_results_json",
+    "expected_model_path",
 )
 
 STARTUP_PULL_MARKERS = (
@@ -879,6 +887,32 @@ def parse_structured_probe_fields_from_text(text: str) -> dict:
     return fields
 
 
+def structured_value(fields: dict, key: str, fallback=None):
+    value = fields.get(key)
+    if value is None:
+        return fallback
+    if isinstance(value, str) and value and value[0] in "[{":
+        try:
+            return json.loads(value)
+        except Exception:
+            parsed = maybe_json_from_string(value)
+            if parsed is not None:
+                return parsed
+    return value
+
+
+def structured_value_with_parse_error(fields: dict, key: str, fallback=None) -> tuple[object, str]:
+    value = fields.get(key)
+    if value is None:
+        return fallback, ""
+    if isinstance(value, str) and value and value[0] in "[{":
+        try:
+            return json.loads(value), ""
+        except Exception as exc:
+            return value, f"{type(exc).__name__}: {truncate(exc, 300)}"
+    return value, ""
+
+
 def find_fp8_report_in_text(text: str):
     for line in text.splitlines():
         parsed = maybe_json_from_string(line)
@@ -1025,6 +1059,24 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
     fp8_report = data.get("fp8_runtime_report")
     fp8_summary = summarize_fp8_report(fp8_report)
     structured_probe_fields = data.get("structured_probe_fields") or {}
+    environment, environment_parse_error = structured_value_with_parse_error(structured_probe_fields, "environment", data.get("environment"))
+    loader_preflight, loader_preflight_parse_error = structured_value_with_parse_error(structured_probe_fields, "loader_preflight", data.get("loader_preflight"))
+    path_checks, path_checks_parse_error = structured_value_with_parse_error(structured_probe_fields, "path_checks", data.get("path_checks"))
+    detected_mount_points, detected_mount_points_parse_error = structured_value_with_parse_error(structured_probe_fields, "detected_mount_points_json", data.get("detected_mount_points"))
+    candidate_roots, candidate_roots_parse_error = structured_value_with_parse_error(structured_probe_fields, "candidate_model_roots_json", data.get("candidate_model_roots"))
+    model_search_results, model_search_results_parse_error = structured_value_with_parse_error(structured_probe_fields, "model_search_results_json", data.get("model_search_results"))
+    structured_parse_errors = {
+        key: value
+        for key, value in {
+            "environment": environment_parse_error,
+            "loader_preflight": loader_preflight_parse_error,
+            "path_checks": path_checks_parse_error,
+            "detected_mount_points_json": detected_mount_points_parse_error,
+            "candidate_model_roots_json": candidate_roots_parse_error,
+            "model_search_results_json": model_search_results_parse_error,
+        }.items()
+        if value
+    }
     selected = data.get("market_selection", {}).get("selected", {})
     selected_summary = selected.get("selected_summary", {})
     return {
@@ -1099,7 +1151,16 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
         "exception_errno": structured_probe_fields.get("exception_errno") or data.get("exception_errno"),
         "cwd": structured_probe_fields.get("cwd") or data.get("cwd"),
         "probe_file": structured_probe_fields.get("probe_file") or data.get("probe_file"),
+        "probe_script_path": structured_probe_fields.get("probe_script_path") or data.get("probe_script_path"),
         "loader_entrypoint": structured_probe_fields.get("loader_entrypoint") or data.get("loader_entrypoint"),
+        "environment": environment,
+        "loader_preflight": loader_preflight,
+        "path_checks": path_checks,
+        "detected_mount_points": detected_mount_points,
+        "candidate_model_roots": candidate_roots,
+        "model_search_results": model_search_results,
+        "expected_model_path": structured_probe_fields.get("expected_model_path") or data.get("expected_model_path"),
+        "structured_probe_parse_errors": structured_parse_errors,
         "original_status": data.get("original_status", ""),
         "fp8_runtime_summary": fp8_summary,
         "fp8_runtime_report": fp8_report,
@@ -1782,8 +1843,8 @@ def run_mock_tests() -> int:
 
         gate0_fail_log = "\n".join(
             [
-                "[TEMP_FP8_WAN_GATE0_PROBE_V1] probe_build_id=gate0-diagnostics-v2",
-                "[TEMP_FP8_WAN_GATE0_PROBE_V1] report_schema_version=fp8-wan-gate0-v2",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] probe_build_id=gate0-mount-audit-v1",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] report_schema_version=fp8-wan-gate0-v3",
                 "[TEMP_FP8_WAN_GATE0_PROBE_V1] failure_stage=wan_load",
                 "[TEMP_FP8_WAN_GATE0_PROBE_V1] exception_type=FileNotFoundError",
                 "[TEMP_FP8_WAN_GATE0_PROBE_V1] exception_message=[Errno 2] Wan model dir not found: '/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B'",
@@ -1793,14 +1854,22 @@ def run_mock_tests() -> int:
                 "[TEMP_FP8_WAN_GATE0_PROBE_V1] exception_errno=2",
                 "[TEMP_FP8_WAN_GATE0_PROBE_V1] cwd=/opt/ayl-simplepod-wan22-s2v-fp8-runtime-probe",
                 "[TEMP_FP8_WAN_GATE0_PROBE_V1] probe_file=/opt/ayl-simplepod-wan22-s2v-fp8-runtime-probe/temp_fp8_wan_gate0_probe_v1.py",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] probe_script_path=/opt/ayl-simplepod-wan22-s2v-fp8-runtime-probe/temp_fp8_wan_gate0_probe_v1.py",
                 "[TEMP_FP8_WAN_GATE0_PROBE_V1] loader_entrypoint=wan.speech2video.WanS2V",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] environment={\"image_tag\":\"0.3.04-blackwell-fp8-wan-gate0-mount-audit-v1\",\"wan_commit\":\"42bf4cfaa384bc21833865abc2f9e6c0e67233dc\"}",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] loader_preflight={\"loader_entrypoint\":\"wan.speech2video.WanS2V\",\"path_checks\":[{\"label\":\"model_dir\",\"exists\":false}]}",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] path_checks=[{\"label\":\"model_dir\",\"exists\":false}]",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] detected_mount_points_json=[\"/mnt\",\"/runpod-volume\"]",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] candidate_model_roots_json=[\"/mnt\",\"/runpod-volume\"]",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] model_search_results_json=[{\"path\":\"/runpod-volume/wan2.2/Wan2.2-S2V-14B\",\"exists\":true,\"is_dir\":true,\"depth\":2,\"matched_name\":\"Wan2.2-S2V-14B\"}]",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] expected_model_path=/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B",
                 "[TEMP_FP8_WAN_GATE0_PROBE_V1] runtime_certification=FAIL",
             ]
         )
         result, _calls = run_monitor_mock([running_empty], [gate0_fail_log])
         assert result["status"] == "runtime_certification_failed", result
         assert result["runtime_certification_value"] == "FAIL", result
-        assert result["structured_probe_fields"]["probe_build_id"] == "gate0-diagnostics-v2", result
+        assert result["structured_probe_fields"]["probe_build_id"] == "gate0-mount-audit-v1", result
         assert result["structured_probe_fields"]["missing_path"] == "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B", result
         mock_args = argparse.Namespace(
             execute=True,
@@ -1819,13 +1888,23 @@ def run_mock_tests() -> int:
                 "runtime_certification_value": "FAIL",
             },
         )
-        assert recovered_report["probe_build_id"] == "gate0-diagnostics-v2", recovered_report
-        assert recovered_report["report_schema_version"] == "fp8-wan-gate0-v2", recovered_report
+        assert recovered_report["probe_build_id"] == "gate0-mount-audit-v1", recovered_report
+        assert recovered_report["report_schema_version"] == "fp8-wan-gate0-v3", recovered_report
         assert recovered_report["failure_stage"] == "wan_load", recovered_report
         assert recovered_report["exception_type"] == "FileNotFoundError", recovered_report
+        assert recovered_report["probe_script_path"].endswith("temp_fp8_wan_gate0_probe_v1.py"), recovered_report
+        assert recovered_report["environment"]["wan_commit"] == "42bf4cfaa384bc21833865abc2f9e6c0e67233dc", recovered_report
+        assert recovered_report["loader_preflight"]["path_checks"][0]["exists"] is False, recovered_report
+        assert recovered_report["path_checks"][0]["label"] == "model_dir", recovered_report
+        assert recovered_report["detected_mount_points"] == ["/mnt", "/runpod-volume"], recovered_report
+        assert recovered_report["candidate_model_roots"] == ["/mnt", "/runpod-volume"], recovered_report
+        assert recovered_report["model_search_results"][0]["matched_name"] == "Wan2.2-S2V-14B", recovered_report
+        assert recovered_report["expected_model_path"] == "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B", recovered_report
+        assert not recovered_report["structured_probe_parse_errors"], recovered_report
         assert recovered_report["exception_message"], recovered_report
         assert recovered_report["missing_path"] == "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B", recovered_report
         assert recovered_report["resolved_path"] == "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B", recovered_report
+        announce("recovery_mount_fields_preserved")
         announce("probe_monitor_gate0_structured_failure_fields_preserved")
 
         json_pass = make_mock_instance(

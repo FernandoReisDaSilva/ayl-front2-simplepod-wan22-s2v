@@ -16,12 +16,12 @@ from typing import Any
 
 
 SCRIPT_ID = "TEMP_FP8_WAN_GATE0_PROBE_V1"
-PROBE_BUILD_ID = "gate0-diagnostics-v2"
-REPORT_SCHEMA_VERSION = "fp8-wan-gate0-v2"
+PROBE_BUILD_ID = "gate0-mount-audit-v1"
+REPORT_SCHEMA_VERSION = "fp8-wan-gate0-v3"
 DEFAULT_REPORT_PATH = Path(os.getenv("AYL_FP8_WAN_GATE0_REPORT_PATH", "/tmp/fp8_wan_gate0_probe_v1.json"))
 DEFAULT_MODEL_DIR = Path(os.getenv("WAN22_S2V_MODEL_DIR", "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B"))
 DEFAULT_WAN_REPO_DIR = Path(os.getenv("WAN22_REPO_DIR", "/opt/Wan2.2"))
-DEFAULT_IMAGE_TAG = os.getenv("AYL_IMAGE_TAG", "0.3.03-blackwell-fp8-wan-gate0-diagnostics-v2")
+DEFAULT_IMAGE_TAG = os.getenv("AYL_IMAGE_TAG", "0.3.04-blackwell-fp8-wan-gate0-mount-audit-v1")
 DEFAULT_WAN_COMMIT = os.getenv("AYL_WAN22_GIT_COMMIT", "42bf4cfaa384bc21833865abc2f9e6c0e67233dc")
 TASK = "s2v-14B"
 MIN_LINEAR_PARAMS = int(os.getenv("AYL_FP8_GATE0_MIN_LINEAR_PARAMS", "16384"))
@@ -35,6 +35,17 @@ LOADER_REQUIRED_RELATIVE_PATHS = (
     "wan/configs/__init__.py",
     "wan/modules/s2v/model_s2v.py",
 )
+MODEL_SEARCH_NAMES = ("Wan2.2-S2V-14B", "wan2.2-s2v-14b", "Wan2.2", "wan2.2")
+STANDARD_MODEL_CANDIDATE_DIRS = (
+    "/mnt",
+    "/workspace",
+    "/runpod-volume",
+    "/volume",
+    "/models",
+    "/data",
+    "/root",
+    "/opt",
+)
 
 
 def now_iso() -> str:
@@ -44,6 +55,16 @@ def now_iso() -> str:
 def emit_stage(stage: str, **values: Any) -> None:
     suffix = "".join(f" {key}={value}" for key, value in values.items() if value is not None and value != "")
     print(f"[{SCRIPT_ID}] {stage}{suffix}", flush=True)
+
+
+def emit_structured_field(key: str, value: Any, limit: int = 6000) -> None:
+    try:
+        rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        rendered = str(value)
+    if len(rendered) > limit:
+        rendered = rendered[:limit] + "...<truncated>"
+    emit_stage(f"{key}={rendered}")
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -120,6 +141,157 @@ def directory_inventory(path: Path, *, max_entries: int = 80, max_depth: int = 2
         result["entries"].append(entry)
         count += 1
     return result
+
+
+def statvfs_summary(path: Path) -> dict[str, Any]:
+    result = {"path": str(path), "exists": path.exists()}
+    if not path.exists():
+        return result
+    try:
+        stats = os.statvfs(path)
+    except OSError as exc:
+        result["error_type"] = type(exc).__name__
+        result["error"] = truncate(exc)
+        return result
+    block_size = int(stats.f_frsize or stats.f_bsize or 0)
+    total_bytes = block_size * int(stats.f_blocks)
+    available_bytes = block_size * int(stats.f_bavail)
+    free_bytes = block_size * int(stats.f_bfree)
+    result.update(
+        {
+            "total_bytes": total_bytes,
+            "available_bytes": available_bytes,
+            "free_bytes": free_bytes,
+            "total_gb": round(total_bytes / (1024**3), 3) if total_bytes else 0,
+            "available_gb": round(available_bytes / (1024**3), 3) if available_bytes else 0,
+            "free_gb": round(free_bytes / (1024**3), 3) if free_bytes else 0,
+        }
+    )
+    return result
+
+
+def parse_proc_mounts(proc_mounts_path: Path = Path("/proc/mounts")) -> list[dict[str, Any]]:
+    mounts: list[dict[str, Any]] = []
+    try:
+        lines = proc_mounts_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return mounts
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        mounts.append(
+            {
+                "source": parts[0].replace("\\040", " "),
+                "mount_point": parts[1].replace("\\040", " "),
+                "fs_type": parts[2],
+                "options": parts[3] if len(parts) > 3 else "",
+            }
+        )
+    return mounts
+
+
+def unique_paths(paths: list[Path]) -> list[Path]:
+    seen = set()
+    result = []
+    for path in paths:
+        text = str(path)
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(path)
+    return result
+
+
+def collect_mount_inventory(
+    expected_model_path: Path,
+    *,
+    proc_mounts_path: Path = Path("/proc/mounts"),
+    candidate_dirs: tuple[str, ...] = STANDARD_MODEL_CANDIDATE_DIRS,
+) -> dict[str, Any]:
+    proc_mounts = parse_proc_mounts(proc_mounts_path)
+    mount_points = unique_paths([Path(item["mount_point"]) for item in proc_mounts] + [Path(item) for item in candidate_dirs])
+    shallow_dirs = [Path(item) for item in candidate_dirs]
+    existing_mount_points = [path for path in mount_points if path.exists()]
+    return {
+        "proc_mounts_available": proc_mounts_path.exists(),
+        "proc_mounts": proc_mounts[:200],
+        "detected_mount_points": [str(path) for path in existing_mount_points[:200]],
+        "df": [statvfs_summary(path) for path in existing_mount_points[:80]],
+        "shallow_directory_inventory": {
+            str(path): directory_inventory(path, max_entries=500, max_depth=4) for path in shallow_dirs
+        },
+        "expected_model_path": str(expected_model_path),
+    }
+
+
+def candidate_model_roots(mount_inventory: dict[str, Any], expected_model_path: Path) -> list[str]:
+    candidates = [Path(item) for item in mount_inventory.get("detected_mount_points", [])]
+    candidates.extend(Path(item) for item in STANDARD_MODEL_CANDIDATE_DIRS)
+    candidates.extend([expected_model_path.parent, expected_model_path.parent.parent])
+    existing = []
+    for path in unique_paths(candidates):
+        if path.exists() and path.is_dir():
+            existing.append(str(path))
+    return existing
+
+
+def search_model_directories(root_paths: list[str], *, max_depth: int = 4, max_entries: int = 500) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    visited = set()
+    scanned = 0
+    target_names = set(MODEL_SEARCH_NAMES)
+    queue: list[tuple[Path, int]] = [(Path(path), 0) for path in root_paths]
+    while queue and scanned < max_entries:
+        current, depth = queue.pop(0)
+        current_text = str(current)
+        if current_text in visited:
+            continue
+        visited.add(current_text)
+        scanned += 1
+        try:
+            is_dir = current.is_dir()
+        except OSError:
+            is_dir = False
+        if is_dir and current.name in target_names:
+            results.append(
+                {
+                    "path": current_text,
+                    "exists": True,
+                    "is_dir": True,
+                    "depth": depth,
+                    "matched_name": current.name,
+                }
+            )
+        if not is_dir or depth >= max_depth:
+            continue
+        try:
+            children = sorted(current.iterdir(), key=lambda item: item.name)
+        except OSError:
+            continue
+        for child in children:
+            try:
+                if child.is_dir():
+                    queue.append((child, depth + 1))
+            except OSError:
+                continue
+    if queue:
+        results.append({"truncated": True, "scanned_entries": scanned, "remaining_queue": len(queue)})
+    return results
+
+
+def add_mount_and_model_audit(report: dict[str, Any], expected_model_path: Path) -> None:
+    mount_inventory = collect_mount_inventory(expected_model_path)
+    roots = candidate_model_roots(mount_inventory, expected_model_path)
+    search_results = search_model_directories(roots)
+    report["mount_inventory"] = mount_inventory
+    report["candidate_model_roots"] = roots
+    report["model_search_results"] = search_results
+    report["expected_model_path"] = str(expected_model_path)
+    emit_structured_field("detected_mount_points_json", mount_inventory.get("detected_mount_points", []))
+    emit_structured_field("candidate_model_roots_json", roots)
+    emit_structured_field("model_search_results_json", search_results)
+    emit_stage(f"expected_model_path={expected_model_path}")
 
 
 def add_loader_preflight(report: dict[str, Any], args: argparse.Namespace) -> None:
@@ -524,6 +696,7 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
         emit_stage("bootstrap_started")
         emit_stage(f"probe_build_id={PROBE_BUILD_ID}")
         emit_stage(f"report_schema_version={REPORT_SCHEMA_VERSION}")
+        emit_stage(f"probe_script_path={report.get('probe_script_path', '')}")
         if str(args.wan_repo_dir) not in sys.path:
             sys.path.insert(0, str(args.wan_repo_dir))
         if str(Path.cwd()) not in sys.path:
@@ -550,6 +723,10 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
         emit_stage("wan_load_started")
         load_started = time.monotonic()
         add_loader_preflight(report, args)
+        add_mount_and_model_audit(report, args.model_dir)
+        emit_structured_field("environment", report.get("environment", {}))
+        emit_structured_field("loader_preflight", report.get("wan_load_preflight", {}))
+        emit_structured_field("path_checks", report.get("wan_load_preflight", {}).get("path_checks", []))
         if not args.wan_repo_dir.exists():
             raise_missing_path(args.wan_repo_dir, "Wan repo not found")
         if not args.model_dir.exists():
@@ -744,6 +921,53 @@ def run_mock_subprocess(stage: str, report_path: Path) -> subprocess.CompletedPr
 def run_mock_tests() -> int:
     with tempfile.TemporaryDirectory(prefix="ayl_fp8_wan_gate0_tests_") as tmpdir:
         tmp = Path(tmpdir)
+
+        expected_mount = tmp / "mnt" / "ayl_models"
+        expected_model = expected_mount / "wan2.2" / "Wan2.2-S2V-14B"
+        expected_model.mkdir(parents=True)
+        expected_proc = tmp / "proc_mounts_expected"
+        expected_proc.write_text(f"mockdev {expected_mount} ext4 rw 0 0\n", encoding="utf-8")
+        expected_inventory = collect_mount_inventory(
+            expected_model,
+            proc_mounts_path=expected_proc,
+            candidate_dirs=(str(expected_mount),),
+        )
+        expected_roots = candidate_model_roots(expected_inventory, expected_model)
+        expected_results = search_model_directories(expected_roots)
+        assert any(item.get("path") == str(expected_model) for item in expected_results), expected_results
+        print("mount_expected_path_present: PASS", flush=True)
+
+        alternate_mount = tmp / "runpod-volume"
+        alternate_model = alternate_mount / "wan2.2" / "Wan2.2-S2V-14B"
+        alternate_model.mkdir(parents=True)
+        alternate_proc = tmp / "proc_mounts_alternate"
+        alternate_proc.write_text(f"mockdev {alternate_mount} ext4 rw 0 0\n", encoding="utf-8")
+        alternate_inventory = collect_mount_inventory(
+            alternate_model,
+            proc_mounts_path=alternate_proc,
+            candidate_dirs=(str(alternate_mount),),
+        )
+        alternate_results = search_model_directories(candidate_model_roots(alternate_inventory, alternate_model))
+        assert any(item.get("path") == str(alternate_model) for item in alternate_results), alternate_results
+        print("mount_alternate_path_present: PASS", flush=True)
+
+        missing_mount = tmp / "missing-volume"
+        missing_mount.mkdir()
+        missing_model = missing_mount / "wan2.2" / "Wan2.2-S2V-14B"
+        missing_inventory = collect_mount_inventory(missing_model, candidate_dirs=(str(missing_mount),))
+        missing_results = search_model_directories(candidate_model_roots(missing_inventory, missing_model))
+        assert not any(item.get("path") == str(missing_model) for item in missing_results), missing_results
+        print("mount_present_model_missing: PASS", flush=True)
+
+        multi_a = tmp / "multi-a"
+        multi_b = tmp / "multi-b"
+        multi_model = multi_b / "Wan2.2" / "Wan2.2-S2V-14B"
+        multi_a.mkdir()
+        multi_model.mkdir(parents=True)
+        multi_results = search_model_directories([str(multi_a), str(multi_b)])
+        assert any(item.get("path") == str(multi_model) for item in multi_results), multi_results
+        assert not any(item.get("path") == str(multi_a / "Wan2.2-S2V-14B") for item in multi_results), multi_results
+        print("mount_multiple_candidates: PASS", flush=True)
 
         missing_root_report = tmp / "mock_missing_root.json"
         missing_root = run_mock_subprocess("wan_missing_root", missing_root_report)
