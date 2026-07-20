@@ -21,7 +21,7 @@ REPORT_SCHEMA_VERSION = "fp8-wan-gate0-v3"
 DEFAULT_REPORT_PATH = Path(os.getenv("AYL_FP8_WAN_GATE0_REPORT_PATH", "/tmp/fp8_wan_gate0_probe_v1.json"))
 DEFAULT_MODEL_DIR = Path(os.getenv("WAN22_S2V_MODEL_DIR", "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B"))
 DEFAULT_WAN_REPO_DIR = Path(os.getenv("WAN22_REPO_DIR", "/opt/Wan2.2"))
-DEFAULT_IMAGE_TAG = os.getenv("AYL_IMAGE_TAG", "0.3.04-blackwell-fp8-wan-gate0-mount-audit-v1")
+DEFAULT_IMAGE_TAG = os.getenv("AYL_IMAGE_TAG", "0.3.05-blackwell-fp8-wan-gate0-mount-audit-v2")
 DEFAULT_WAN_COMMIT = os.getenv("AYL_WAN22_GIT_COMMIT", "42bf4cfaa384bc21833865abc2f9e6c0e67233dc")
 TASK = "s2v-14B"
 MIN_LINEAR_PARAMS = int(os.getenv("AYL_FP8_GATE0_MIN_LINEAR_PARAMS", "16384"))
@@ -88,14 +88,52 @@ def path_check(path: Path) -> dict[str, Any]:
     expanded = path.expanduser()
     try:
         resolved = expanded.resolve(strict=False)
-    except Exception:
+    except (OSError, RuntimeError):
         resolved = expanded.absolute()
-    return {
+    result = {
         "checked_path": str(path),
         "resolved_path": str(resolved),
-        "exists": expanded.exists(),
-        "is_dir": expanded.is_dir(),
-        "is_file": expanded.is_file(),
+        "exists": False,
+        "is_dir": False,
+        "is_file": False,
+    }
+    try:
+        result["exists"] = expanded.exists()
+        result["is_dir"] = expanded.is_dir()
+        result["is_file"] = expanded.is_file()
+    except (PermissionError, FileNotFoundError, OSError) as exc:
+        result["access_error_type"] = type(exc).__name__
+        result["access_error"] = truncate(exc)
+        return result
+    return result
+
+
+def safe_path_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except (PermissionError, FileNotFoundError, OSError):
+        return False
+
+
+def safe_path_is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except (PermissionError, FileNotFoundError, OSError):
+        return False
+
+
+def safe_path_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except (PermissionError, FileNotFoundError, OSError):
+        return False
+
+
+def skipped_path_entry(path: Path, exc: BaseException) -> dict[str, str]:
+    return {
+        "path": str(path),
+        "error_type": type(exc).__name__,
+        "error": truncate(exc),
     }
 
 
@@ -106,46 +144,74 @@ def relevant_env_snapshot() -> dict[str, str]:
 
 def directory_inventory(path: Path, *, max_entries: int = 80, max_depth: int = 2) -> dict[str, Any]:
     root = path.expanduser()
+    try:
+        resolved_root = str(root.resolve(strict=False))
+    except (OSError, RuntimeError):
+        resolved_root = str(root.absolute())
     result = {
         "root": str(path),
-        "resolved_root": str(root.resolve(strict=False)),
-        "exists": root.exists(),
+        "resolved_root": resolved_root,
+        "exists": safe_path_exists(root),
         "entries": [],
+        "skipped_entries": [],
         "truncated": False,
         "max_entries": max_entries,
         "max_depth": max_depth,
     }
-    if not root.exists() or not root.is_dir():
+    if not result["exists"] or not safe_path_is_dir(root):
         return result
     count = 0
-    for item in sorted(root.rglob("*"), key=lambda entry: str(entry)):
+    queue: list[tuple[Path, int]] = [(root, 0)]
+    visited = set()
+    while queue and count < max_entries:
+        current, depth = queue.pop(0)
+        current_text = str(current)
+        if current_text in visited:
+            continue
+        visited.add(current_text)
         try:
-            relative = item.relative_to(root)
-        except ValueError:
+            children = sorted(current.iterdir(), key=lambda entry: str(entry))
+        except (PermissionError, FileNotFoundError, OSError) as exc:
+            result["skipped_entries"].append(skipped_path_entry(current, exc))
             continue
-        if len(relative.parts) > max_depth:
-            continue
-        if count >= max_entries:
-            result["truncated"] = True
-            break
-        entry = {
-            "path": str(relative),
-            "is_dir": item.is_dir(),
-            "is_file": item.is_file(),
-        }
-        if item.is_file():
+        for item in children:
+            if count >= max_entries:
+                result["truncated"] = True
+                break
             try:
-                entry["size_bytes"] = item.stat().st_size
-            except OSError:
-                entry["size_bytes"] = None
-        result["entries"].append(entry)
-        count += 1
+                relative = item.relative_to(root)
+            except ValueError:
+                continue
+            if len(relative.parts) > max_depth:
+                continue
+            try:
+                is_dir = item.is_dir()
+                is_file = item.is_file()
+                is_symlink = item.is_symlink()
+            except (PermissionError, FileNotFoundError, OSError) as exc:
+                result["skipped_entries"].append(skipped_path_entry(item, exc))
+                continue
+            entry = {
+                "path": str(relative),
+                "is_dir": is_dir,
+                "is_file": is_file,
+                "is_symlink": is_symlink,
+            }
+            if is_file:
+                try:
+                    entry["size_bytes"] = item.stat().st_size
+                except (PermissionError, FileNotFoundError, OSError):
+                    entry["size_bytes"] = None
+            result["entries"].append(entry)
+            count += 1
+            if is_dir and not is_symlink and len(relative.parts) < max_depth:
+                queue.append((item, depth + 1))
     return result
 
 
 def statvfs_summary(path: Path) -> dict[str, Any]:
-    result = {"path": str(path), "exists": path.exists()}
-    if not path.exists():
+    result = {"path": str(path), "exists": safe_path_exists(path)}
+    if not result["exists"]:
         return result
     try:
         stats = os.statvfs(path)
@@ -212,9 +278,9 @@ def collect_mount_inventory(
     proc_mounts = parse_proc_mounts(proc_mounts_path)
     mount_points = unique_paths([Path(item["mount_point"]) for item in proc_mounts] + [Path(item) for item in candidate_dirs])
     shallow_dirs = [Path(item) for item in candidate_dirs]
-    existing_mount_points = [path for path in mount_points if path.exists()]
+    existing_mount_points = [path for path in mount_points if safe_path_exists(path)]
     return {
-        "proc_mounts_available": proc_mounts_path.exists(),
+        "proc_mounts_available": safe_path_exists(proc_mounts_path),
         "proc_mounts": proc_mounts[:200],
         "detected_mount_points": [str(path) for path in existing_mount_points[:200]],
         "df": [statvfs_summary(path) for path in existing_mount_points[:80]],
@@ -231,13 +297,14 @@ def candidate_model_roots(mount_inventory: dict[str, Any], expected_model_path: 
     candidates.extend([expected_model_path.parent, expected_model_path.parent.parent])
     existing = []
     for path in unique_paths(candidates):
-        if path.exists() and path.is_dir():
+        if safe_path_exists(path) and safe_path_is_dir(path):
             existing.append(str(path))
     return existing
 
 
 def search_model_directories(root_paths: list[str], *, max_depth: int = 4, max_entries: int = 500) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
     visited = set()
     scanned = 0
     target_names = set(MODEL_SEARCH_NAMES)
@@ -251,7 +318,8 @@ def search_model_directories(root_paths: list[str], *, max_depth: int = 4, max_e
         scanned += 1
         try:
             is_dir = current.is_dir()
-        except OSError:
+        except (PermissionError, FileNotFoundError, OSError) as exc:
+            skipped.append(skipped_path_entry(current, exc))
             is_dir = False
         if is_dir and current.name in target_names:
             results.append(
@@ -267,16 +335,20 @@ def search_model_directories(root_paths: list[str], *, max_depth: int = 4, max_e
             continue
         try:
             children = sorted(current.iterdir(), key=lambda item: item.name)
-        except OSError:
+        except (PermissionError, FileNotFoundError, OSError) as exc:
+            skipped.append(skipped_path_entry(current, exc))
             continue
         for child in children:
             try:
-                if child.is_dir():
+                if child.is_dir() and not child.is_symlink():
                     queue.append((child, depth + 1))
-            except OSError:
+            except (PermissionError, FileNotFoundError, OSError) as exc:
+                skipped.append(skipped_path_entry(child, exc))
                 continue
     if queue:
         results.append({"truncated": True, "scanned_entries": scanned, "remaining_queue": len(queue)})
+    if skipped:
+        results.append({"skipped_entries": skipped[:80], "skipped_entries_count": len(skipped)})
     return results
 
 
@@ -958,6 +1030,35 @@ def run_mock_tests() -> int:
         missing_results = search_model_directories(candidate_model_roots(missing_inventory, missing_model))
         assert not any(item.get("path") == str(missing_model) for item in missing_results), missing_results
         print("mount_present_model_missing: PASS", flush=True)
+
+        accessible_mount = tmp / "accessible-volume"
+        inaccessible_mount = tmp / "inaccessible-volume"
+        accessible_child = accessible_mount / "visible"
+        accessible_child.mkdir(parents=True)
+        inaccessible_mount.mkdir()
+        original_iterdir = Path.iterdir
+
+        def mocked_iterdir(self):
+            if self == inaccessible_mount:
+                raise PermissionError(13, "mock permission denied", str(self))
+            return original_iterdir(self)
+
+        Path.iterdir = mocked_iterdir
+        try:
+            permission_inventory = collect_mount_inventory(
+                accessible_mount / "wan2.2" / "Wan2.2-S2V-14B",
+                candidate_dirs=(str(accessible_mount), str(inaccessible_mount)),
+            )
+            accessible_listing = permission_inventory["shallow_directory_inventory"][str(accessible_mount)]
+            inaccessible_listing = permission_inventory["shallow_directory_inventory"][str(inaccessible_mount)]
+            assert accessible_listing["entries"], permission_inventory
+            assert inaccessible_listing["skipped_entries"][0]["error_type"] == "PermissionError", permission_inventory
+            search_results = search_model_directories([str(accessible_mount), str(inaccessible_mount)])
+            assert any(item.get("path") == "visible" or item.get("path", "").endswith("/visible") for item in accessible_listing["entries"]), permission_inventory
+            assert any(item.get("skipped_entries_count") for item in search_results), search_results
+        finally:
+            Path.iterdir = original_iterdir
+        print("mount_permission_error_tolerated: PASS", flush=True)
 
         multi_a = tmp / "multi-a"
         multi_b = tmp / "multi-b"
