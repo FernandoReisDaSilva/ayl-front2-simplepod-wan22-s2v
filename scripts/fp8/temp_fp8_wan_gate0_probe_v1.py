@@ -36,8 +36,17 @@ LOADER_REQUIRED_RELATIVE_PATHS = (
     "wan/modules/s2v/model_s2v.py",
 )
 MODEL_SEARCH_NAMES = ("Wan2.2-S2V-14B", "wan2.2-s2v-14b", "Wan2.2", "wan2.2")
+MODEL_REQUIRED_FILE_MARKERS = (
+    "models_t5_umt5-xxl-enc-bf16.pth",
+    "Wan2.1_VAE.pth",
+    "wav2vec2-large-xlsr-53-english/model.safetensors",
+)
+MODEL_REQUIRED_GLOB_MARKERS = (
+    "diffusion_pytorch_model-*.safetensors",
+)
 STANDARD_MODEL_CANDIDATE_DIRS = (
     "/mnt",
+    "/storage",
     "/workspace",
     "/runpod-volume",
     "/volume",
@@ -45,6 +54,13 @@ STANDARD_MODEL_CANDIDATE_DIRS = (
     "/data",
     "/root",
     "/opt",
+)
+STORAGE_MODEL_CANDIDATES = (
+    Path("/storage/wan2.2/Wan2.2-S2V-14B"),
+    Path("/storage/wan2.2"),
+)
+LEGACY_MODEL_CANDIDATES = (
+    Path("/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B"),
 )
 
 
@@ -352,17 +368,165 @@ def search_model_directories(root_paths: list[str], *, max_depth: int = 4, max_e
     return results
 
 
+def model_marker_validation(path: Path) -> dict[str, Any]:
+    candidate = path.expanduser()
+    try:
+        resolved = candidate.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        resolved = candidate.absolute()
+        resolve_error = {"error_type": type(exc).__name__, "error": truncate(exc)}
+    else:
+        resolve_error = {}
+    validation: dict[str, Any] = {
+        "path": str(path),
+        "resolved_path": str(resolved),
+        "exists": False,
+        "is_dir": False,
+        "is_symlink": False,
+        "accepted": False,
+        "reject_reason": "",
+        "required_file_markers": list(MODEL_REQUIRED_FILE_MARKERS),
+        "required_glob_markers": list(MODEL_REQUIRED_GLOB_MARKERS),
+        "markers_found": [],
+        "markers_missing": [],
+        "glob_markers_found": {},
+        "direct_inventory": {},
+    }
+    if resolve_error:
+        validation["resolve_error"] = resolve_error
+    try:
+        validation["exists"] = candidate.exists()
+        validation["is_dir"] = candidate.is_dir()
+        validation["is_symlink"] = candidate.is_symlink()
+    except (PermissionError, FileNotFoundError, OSError) as exc:
+        validation["access_error_type"] = type(exc).__name__
+        validation["access_error"] = truncate(exc)
+        validation["reject_reason"] = "access_error"
+        return validation
+    if not validation["exists"]:
+        validation["reject_reason"] = "path_missing"
+        return validation
+    if validation["is_symlink"]:
+        validation["reject_reason"] = "candidate_is_symlink"
+        return validation
+    if not validation["is_dir"]:
+        validation["reject_reason"] = "not_directory"
+        return validation
+    validation["direct_inventory"] = directory_inventory(candidate, max_entries=120, max_depth=2)
+    for marker in MODEL_REQUIRED_FILE_MARKERS:
+        marker_path = candidate / marker
+        if safe_path_is_file(marker_path):
+            validation["markers_found"].append(marker)
+        else:
+            validation["markers_missing"].append(marker)
+    for pattern in MODEL_REQUIRED_GLOB_MARKERS:
+        try:
+            matches = sorted(str(item.name) for item in candidate.glob(pattern) if item.is_file())
+        except (PermissionError, FileNotFoundError, OSError) as exc:
+            validation.setdefault("glob_errors", {})[pattern] = {
+                "error_type": type(exc).__name__,
+                "error": truncate(exc),
+            }
+            matches = []
+        validation["glob_markers_found"][pattern] = matches[:20]
+        if not matches:
+            validation["markers_missing"].append(pattern)
+    if validation["markers_missing"]:
+        validation["reject_reason"] = "missing_required_model_markers"
+        return validation
+    validation["accepted"] = True
+    validation["reject_reason"] = ""
+    return validation
+
+
+def model_path_source_from_argv(argv: list[str] | None = None) -> str:
+    argv = sys.argv[1:] if argv is None else argv
+    if any(arg == "--model-dir" or arg.startswith("--model-dir=") for arg in argv):
+        return "cli_arg_model_dir"
+    if os.getenv("WAN22_S2V_MODEL_DIR"):
+        return "env_WAN22_S2V_MODEL_DIR"
+    return "probe_default_model_dir"
+
+
+def resolve_model_directory(
+    configured_path: Path,
+    *,
+    configured_source: str,
+    search_results: list[dict[str, Any]] | None = None,
+    storage_candidates: tuple[Path, ...] = STORAGE_MODEL_CANDIDATES,
+    legacy_candidates: tuple[Path, ...] = LEGACY_MODEL_CANDIDATES,
+) -> dict[str, Any]:
+    candidate_items: list[dict[str, Any]] = [{"source": configured_source, "path": configured_path}]
+    candidate_items.extend({"source": f"storage_candidate_{idx}", "path": path} for idx, path in enumerate(storage_candidates, start=1))
+    candidate_items.extend({"source": f"legacy_candidate_{idx}", "path": path} for idx, path in enumerate(legacy_candidates, start=1))
+    for item in search_results or []:
+        path_text = item.get("path")
+        if not path_text:
+            continue
+        candidate_items.append({"source": f"discovered:{item.get('matched_name', 'unknown')}", "path": Path(path_text)})
+    deduped: list[dict[str, Any]] = []
+    seen = set()
+    for item in candidate_items:
+        text = str(item["path"])
+        if text in seen:
+            continue
+        seen.add(text)
+        deduped.append(item)
+    resolved: dict[str, Any] = {
+        "configured_model_path": str(configured_path),
+        "resolved_model_path": "",
+        "model_path_source": "",
+        "model_path_candidates": [],
+        "model_path_validation": {},
+        "model_path_resolution_status": "failed_no_structurally_valid_model_dir",
+    }
+    for item in deduped:
+        validation = model_marker_validation(Path(item["path"]))
+        candidate_record = {
+            "source": item["source"],
+            "path": str(item["path"]),
+            "accepted": validation.get("accepted", False),
+            "reject_reason": validation.get("reject_reason", ""),
+            "markers_found": validation.get("markers_found", []),
+            "markers_missing": validation.get("markers_missing", []),
+            "resolved_path": validation.get("resolved_path", ""),
+        }
+        resolved["model_path_candidates"].append(candidate_record)
+        if validation.get("accepted"):
+            resolved.update(
+                {
+                    "resolved_model_path": validation.get("resolved_path") or str(item["path"]),
+                    "model_path_source": item["source"],
+                    "model_path_validation": validation,
+                    "model_path_resolution_status": "resolved",
+                }
+            )
+            break
+    if not resolved["model_path_validation"]:
+        resolved["model_path_validation"] = {
+            "accepted": False,
+            "reject_reason": "no_candidate_passed_structural_validation",
+        }
+    return resolved
+
+
 def add_mount_and_model_audit(report: dict[str, Any], expected_model_path: Path) -> None:
     mount_inventory = collect_mount_inventory(expected_model_path)
     roots = candidate_model_roots(mount_inventory, expected_model_path)
     search_results = search_model_directories(roots)
+    storage_direct_inventory = {
+        "/storage": directory_inventory(Path("/storage"), max_entries=120, max_depth=2),
+        "/storage/wan2.2": directory_inventory(Path("/storage/wan2.2"), max_entries=160, max_depth=2),
+    }
     report["mount_inventory"] = mount_inventory
     report["candidate_model_roots"] = roots
     report["model_search_results"] = search_results
+    report["storage_direct_inventory"] = storage_direct_inventory
     report["expected_model_path"] = str(expected_model_path)
     emit_structured_field("detected_mount_points_json", mount_inventory.get("detected_mount_points", []))
     emit_structured_field("candidate_model_roots_json", roots)
     emit_structured_field("model_search_results_json", search_results)
+    emit_structured_field("storage_direct_inventory_json", storage_direct_inventory)
     emit_stage(f"expected_model_path={expected_model_path}")
 
 
@@ -448,6 +612,9 @@ def initial_report(args: argparse.Namespace) -> dict[str, Any]:
             "task": TASK,
             "wan_repo_dir": str(args.wan_repo_dir),
             "model_dir": str(args.model_dir),
+            "configured_model_path": str(args.model_dir),
+            "configured_model_path_source": model_path_source_from_argv(),
+            "resolved_model_path": "",
             "t5_cpu": False,
             "offload_model": True,
             "convert_model_dtype": True,
@@ -474,6 +641,7 @@ def initial_report(args: argparse.Namespace) -> dict[str, Any]:
         "memory": {},
         "timings": {},
         "wan_load": {},
+        "model_path_resolution": {},
         "fp8_quantization": {},
         "first_inference": {},
         "cleanup": {},
@@ -796,13 +964,40 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
         load_started = time.monotonic()
         add_loader_preflight(report, args)
         add_mount_and_model_audit(report, args.model_dir)
+        model_path_resolution = resolve_model_directory(
+            args.model_dir,
+            configured_source=report["config"].get("configured_model_path_source", model_path_source_from_argv()),
+            search_results=report.get("model_search_results", []),
+        )
+        report["model_path_resolution"] = model_path_resolution
+        report["configured_model_path"] = model_path_resolution["configured_model_path"]
+        report["resolved_model_path"] = model_path_resolution["resolved_model_path"]
+        report["model_path_source"] = model_path_resolution["model_path_source"]
+        report["model_path_candidates"] = model_path_resolution["model_path_candidates"]
+        report["model_path_validation"] = model_path_resolution["model_path_validation"]
+        report["model_path_resolution_status"] = model_path_resolution["model_path_resolution_status"]
+        report["config"]["resolved_model_path"] = model_path_resolution["resolved_model_path"]
+        resolved_model_dir = Path(model_path_resolution["resolved_model_path"]) if model_path_resolution["resolved_model_path"] else None
+        if resolved_model_dir is not None:
+            report["wan_load_preflight"]["path_checks"].append(
+                {"label": "resolved_model_dir", **path_check(resolved_model_dir)}
+            )
+            report["wan_load_preflight"]["tree_inventory"]["resolved_model_dir"] = directory_inventory(
+                resolved_model_dir, max_entries=120, max_depth=2
+            )
         emit_structured_field("environment", report.get("environment", {}))
         emit_structured_field("loader_preflight", report.get("wan_load_preflight", {}))
         emit_structured_field("path_checks", report.get("wan_load_preflight", {}).get("path_checks", []))
+        emit_stage(f"configured_model_path={model_path_resolution['configured_model_path']}")
+        emit_stage(f"resolved_model_path={model_path_resolution['resolved_model_path']}")
+        emit_stage(f"model_path_source={model_path_resolution['model_path_source']}")
+        emit_stage(f"model_path_resolution_status={model_path_resolution['model_path_resolution_status']}")
+        emit_structured_field("model_path_candidates_json", model_path_resolution["model_path_candidates"])
+        emit_structured_field("model_path_validation_json", model_path_resolution["model_path_validation"])
         if not args.wan_repo_dir.exists():
             raise_missing_path(args.wan_repo_dir, "Wan repo not found")
-        if not args.model_dir.exists():
-            raise_missing_path(args.model_dir, "Wan model dir not found")
+        if resolved_model_dir is None:
+            raise_missing_path(args.model_dir, "No structurally valid Wan model dir found")
         for relative_path in LOADER_REQUIRED_RELATIVE_PATHS:
             required_path = args.wan_repo_dir / relative_path
             if not required_path.exists():
@@ -821,7 +1016,7 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
         config = resolve_wan_config(TASK)
         pipeline = WanS2V(
             config=config,
-            checkpoint_dir=str(args.model_dir),
+            checkpoint_dir=str(resolved_model_dir),
             device_id=0,
             t5_cpu=False,
             init_on_cpu=True,
@@ -994,9 +1189,120 @@ def run_mock_tests() -> int:
     with tempfile.TemporaryDirectory(prefix="ayl_fp8_wan_gate0_tests_") as tmpdir:
         tmp = Path(tmpdir)
 
+        def make_valid_model_dir(path: Path) -> Path:
+            path.mkdir(parents=True, exist_ok=True)
+            for marker in MODEL_REQUIRED_FILE_MARKERS:
+                marker_path = path / marker
+                marker_path.parent.mkdir(parents=True, exist_ok=True)
+                marker_path.write_bytes(b"mock")
+            (path / "diffusion_pytorch_model-00001-of-00004.safetensors").write_bytes(b"mock")
+            return path
+
+        explicit_valid = make_valid_model_dir(tmp / "explicit" / "Wan2.2-S2V-14B")
+        storage_valid = make_valid_model_dir(tmp / "storage" / "wan2.2")
+        explicit_resolution = resolve_model_directory(
+            explicit_valid,
+            configured_source="cli_arg_model_dir",
+            storage_candidates=(storage_valid,),
+            legacy_candidates=(),
+        )
+        assert explicit_resolution["model_path_resolution_status"] == "resolved", explicit_resolution
+        assert explicit_resolution["model_path_source"] == "cli_arg_model_dir", explicit_resolution
+        assert explicit_resolution["resolved_model_path"] == str(explicit_valid.resolve(strict=False)), explicit_resolution
+        print("model_resolution_explicit_valid_priority: PASS", flush=True)
+
+        missing_configured = tmp / "missing-configured" / "Wan2.2-S2V-14B"
+        fallback_resolution = resolve_model_directory(
+            missing_configured,
+            configured_source="probe_default_model_dir",
+            storage_candidates=(storage_valid,),
+            legacy_candidates=(),
+        )
+        assert fallback_resolution["model_path_resolution_status"] == "resolved", fallback_resolution
+        assert fallback_resolution["model_path_source"] == "storage_candidate_1", fallback_resolution
+        assert fallback_resolution["resolved_model_path"] == str(storage_valid.resolve(strict=False)), fallback_resolution
+        print("model_resolution_missing_configured_falls_back_to_storage_wan2_2: PASS", flush=True)
+
+        invalid_storage = tmp / "invalid-storage" / "wan2.2"
+        invalid_storage.mkdir(parents=True)
+        invalid_resolution = resolve_model_directory(
+            missing_configured,
+            configured_source="probe_default_model_dir",
+            storage_candidates=(invalid_storage,),
+            legacy_candidates=(),
+        )
+        assert invalid_resolution["model_path_resolution_status"].startswith("failed"), invalid_resolution
+        assert any(item.get("reject_reason") == "missing_required_model_markers" for item in invalid_resolution["model_path_candidates"]), invalid_resolution
+        print("model_resolution_storage_without_markers_rejected: PASS", flush=True)
+
+        storage_parent = tmp / "storage-parent" / "wan2.2"
+        storage_child = make_valid_model_dir(storage_parent / "Wan2.2-S2V-14B")
+        storage_child_resolution = resolve_model_directory(
+            missing_configured,
+            configured_source="probe_default_model_dir",
+            storage_candidates=(storage_child, storage_parent),
+            legacy_candidates=(),
+        )
+        assert storage_child_resolution["model_path_source"] == "storage_candidate_1", storage_child_resolution
+        assert storage_child_resolution["resolved_model_path"] == str(storage_child.resolve(strict=False)), storage_child_resolution
+        print("model_resolution_valid_storage_child_accepted: PASS", flush=True)
+
+        legacy_valid = make_valid_model_dir(tmp / "mnt" / "ayl_models" / "wan2.2" / "Wan2.2-S2V-14B")
+        legacy_resolution = resolve_model_directory(
+            missing_configured,
+            configured_source="probe_default_model_dir",
+            storage_candidates=(tmp / "storage-missing" / "wan2.2",),
+            legacy_candidates=(legacy_valid,),
+        )
+        assert legacy_resolution["model_path_source"] == "legacy_candidate_1", legacy_resolution
+        assert legacy_resolution["resolved_model_path"] == str(legacy_valid.resolve(strict=False)), legacy_resolution
+        print("model_resolution_legacy_mnt_ayl_models_still_supported: PASS", flush=True)
+
+        if hasattr(os, "symlink"):
+            symlink_target = make_valid_model_dir(tmp / "symlink-target" / "Wan2.2-S2V-14B")
+            symlink_path = tmp / "symlink-candidate"
+            os.symlink(symlink_target, symlink_path)
+            symlink_validation = model_marker_validation(symlink_path)
+            assert symlink_validation["reject_reason"] == "candidate_is_symlink", symlink_validation
+            loop_inventory = directory_inventory(tmp, max_entries=300, max_depth=3)
+            assert not loop_inventory.get("truncated"), loop_inventory
+            print("model_resolution_symlink_candidate_rejected_without_loop: PASS", flush=True)
+
+        permission_candidate = tmp / "permission-candidate"
+        original_exists = Path.exists
+
+        def mocked_exists(self):
+            if self == permission_candidate:
+                raise PermissionError(13, "mock permission denied", str(self))
+            return original_exists(self)
+
+        Path.exists = mocked_exists
+        try:
+            permission_resolution = resolve_model_directory(
+                permission_candidate,
+                configured_source="probe_default_model_dir",
+                storage_candidates=(),
+                legacy_candidates=(),
+            )
+            assert permission_resolution["model_path_resolution_status"] == "failed_no_structurally_valid_model_dir", permission_resolution
+            assert permission_resolution["model_path_candidates"][0]["reject_reason"] == "access_error", permission_resolution
+        finally:
+            Path.exists = original_exists
+        print("model_resolution_permission_error_tolerated: PASS", flush=True)
+
+        no_valid_resolution = resolve_model_directory(
+            missing_configured,
+            configured_source="probe_default_model_dir",
+            storage_candidates=(tmp / "no-storage" / "wan2.2",),
+            legacy_candidates=(tmp / "no-legacy" / "Wan2.2-S2V-14B",),
+        )
+        assert no_valid_resolution["model_path_resolution_status"] == "failed_no_structurally_valid_model_dir", no_valid_resolution
+        assert not no_valid_resolution["resolved_model_path"], no_valid_resolution
+        print("model_resolution_no_valid_candidate_structured_failure: PASS", flush=True)
+
         expected_mount = tmp / "mnt" / "ayl_models"
         expected_model = expected_mount / "wan2.2" / "Wan2.2-S2V-14B"
-        expected_model.mkdir(parents=True)
+        expected_model.mkdir(parents=True, exist_ok=True)
         expected_proc = tmp / "proc_mounts_expected"
         expected_proc.write_text(f"mockdev {expected_mount} ext4 rw 0 0\n", encoding="utf-8")
         expected_inventory = collect_mount_inventory(

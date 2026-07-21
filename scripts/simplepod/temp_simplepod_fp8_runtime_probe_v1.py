@@ -138,7 +138,14 @@ STRUCTURED_LOG_FIELDS = (
     "detected_mount_points_json",
     "candidate_model_roots_json",
     "model_search_results_json",
+    "storage_direct_inventory_json",
     "expected_model_path",
+    "configured_model_path",
+    "resolved_model_path",
+    "model_path_source",
+    "model_path_resolution_status",
+    "model_path_candidates_json",
+    "model_path_validation_json",
 )
 
 STARTUP_PULL_MARKERS = (
@@ -940,6 +947,7 @@ def analyze_container_log_text(text: str) -> dict:
             "ModuleNotFoundError",
             "ImportError",
             "RuntimeError",
+            "FileNotFoundError",
             "manifest unknown",
             "unauthorized",
             "Error pulling image",
@@ -1065,6 +1073,9 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
     detected_mount_points, detected_mount_points_parse_error = structured_value_with_parse_error(structured_probe_fields, "detected_mount_points_json", data.get("detected_mount_points"))
     candidate_roots, candidate_roots_parse_error = structured_value_with_parse_error(structured_probe_fields, "candidate_model_roots_json", data.get("candidate_model_roots"))
     model_search_results, model_search_results_parse_error = structured_value_with_parse_error(structured_probe_fields, "model_search_results_json", data.get("model_search_results"))
+    storage_direct_inventory, storage_direct_inventory_parse_error = structured_value_with_parse_error(structured_probe_fields, "storage_direct_inventory_json", data.get("storage_direct_inventory"))
+    model_path_candidates, model_path_candidates_parse_error = structured_value_with_parse_error(structured_probe_fields, "model_path_candidates_json", data.get("model_path_candidates"))
+    model_path_validation, model_path_validation_parse_error = structured_value_with_parse_error(structured_probe_fields, "model_path_validation_json", data.get("model_path_validation"))
     structured_parse_errors = {
         key: value
         for key, value in {
@@ -1074,6 +1085,9 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
             "detected_mount_points_json": detected_mount_points_parse_error,
             "candidate_model_roots_json": candidate_roots_parse_error,
             "model_search_results_json": model_search_results_parse_error,
+            "storage_direct_inventory_json": storage_direct_inventory_parse_error,
+            "model_path_candidates_json": model_path_candidates_parse_error,
+            "model_path_validation_json": model_path_validation_parse_error,
         }.items()
         if value
     }
@@ -1159,7 +1173,14 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
         "detected_mount_points": detected_mount_points,
         "candidate_model_roots": candidate_roots,
         "model_search_results": model_search_results,
+        "storage_direct_inventory": storage_direct_inventory,
         "expected_model_path": structured_probe_fields.get("expected_model_path") or data.get("expected_model_path"),
+        "configured_model_path": structured_probe_fields.get("configured_model_path") or data.get("configured_model_path"),
+        "resolved_model_path": structured_probe_fields.get("resolved_model_path") or data.get("resolved_model_path"),
+        "model_path_source": structured_probe_fields.get("model_path_source") or data.get("model_path_source"),
+        "model_path_candidates": model_path_candidates,
+        "model_path_validation": model_path_validation,
+        "model_path_resolution_status": structured_probe_fields.get("model_path_resolution_status") or data.get("model_path_resolution_status"),
         "structured_probe_parse_errors": structured_parse_errors,
         "original_status": data.get("original_status", ""),
         "fp8_runtime_summary": fp8_summary,
@@ -1360,7 +1381,11 @@ def monitor_probe(
         runtime_certification_value = report_certification or log_certification
         runtime_certification_detected = bool(runtime_certification_value)
         matched_failure_markers = list(log_collection.get("failure_markers") or [])
-        explicit_failure_seen = runtime_certification_value == "FAIL" or bool(matched_failure_markers)
+        structured_failure_seen = bool(
+            latest_structured_probe_fields.get("failure_stage")
+            or latest_structured_probe_fields.get("exception_type")
+        )
+        explicit_failure_seen = runtime_certification_value == "FAIL" or bool(matched_failure_markers) or structured_failure_seen
         endpoint_attempts = log_collection.get("container_log_endpoint_attempts") or []
         logs_endpoint_unavailable = bool(endpoint_attempts) and not any(
             attempt.get("http_status_code") == 200 and (attempt.get("body_truncated") or "").strip()
@@ -1376,7 +1401,7 @@ def monitor_probe(
         elif runtime_certification_value == "PASS":
             next_action = "return_runtime_certification_pass"
         elif explicit_failure_seen:
-            next_action = "return_runtime_certification_failed"
+            next_action = "return_probe_failed" if structured_failure_seen and runtime_certification_value != "FAIL" else "return_runtime_certification_failed"
         elif terminal_now:
             next_action = "return_terminal_without_report"
         else:
@@ -1395,6 +1420,7 @@ def monitor_probe(
             "runtime_certification_detected": runtime_certification_detected,
             "runtime_certification_value": runtime_certification_value,
             "matched_failure_markers": matched_failure_markers,
+            "structured_failure_seen": structured_failure_seen,
             "probe_state": "probe_report_found" if report is not None else ("probe_terminal_without_report" if terminal_now else "probe_running_no_report_yet"),
             "next_action": next_action,
         }
@@ -1418,6 +1444,7 @@ def monitor_probe(
                         "runtime_certification_detected": runtime_certification_detected,
                         "runtime_certification_value": runtime_certification_value,
                         "matched_failure_markers": matched_failure_markers,
+                        "structured_failure_seen": structured_failure_seen,
                         "next_action": next_action,
                     },
                     ensure_ascii=False,
@@ -1444,7 +1471,7 @@ def monitor_probe(
     if found_report is not None:
         status = "completed"
     elif explicit_failure_seen:
-        status = "runtime_certification_failed"
+        status = "probe_failed" if latest_structured_probe_fields.get("failure_stage") and runtime_certification_value != "FAIL" else "runtime_certification_failed"
     elif terminal_seen:
         status = "probe_terminal_without_report"
     else:
@@ -1459,6 +1486,8 @@ def monitor_probe(
         probe_state = "probe_terminal_without_report"
     elif status == "runtime_certification_failed":
         probe_state = "runtime_certification_failed"
+    elif status == "probe_failed":
+        probe_state = "probe_failed"
     else:
         probe_state = "probe_report_found"
     return {
@@ -1841,6 +1870,25 @@ def run_mock_tests() -> int:
         assert result["runtime_certification_value"] == "FAIL", result
         announce("probe_monitor_explicit_fail")
 
+        structured_failure_no_cert = "\n".join(
+            [
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] probe_build_id=gate0-mount-audit-v1",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] report_schema_version=fp8-wan-gate0-v3",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] failure_stage=wan_load",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] exception_type=FileNotFoundError",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] exception_message=[Errno 2] No structurally valid Wan model dir found: '/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B'",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] configured_model_path=/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] resolved_model_path=",
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] model_path_resolution_status=failed_no_structurally_valid_model_dir",
+            ]
+        )
+        result, _calls = run_monitor_mock([running_empty], [structured_failure_no_cert])
+        assert result["status"] == "probe_failed", result
+        assert result["probe_state"] == "probe_failed", result
+        assert result["structured_probe_fields"]["failure_stage"] == "wan_load", result
+        assert result["structured_probe_fields"]["model_path_resolution_status"] == "failed_no_structurally_valid_model_dir", result
+        announce("probe_monitor_structured_failure_without_certification_classified")
+
         gate0_fail_log = "\n".join(
             [
                 "[TEMP_FP8_WAN_GATE0_PROBE_V1] probe_build_id=gate0-mount-audit-v1",
@@ -2173,7 +2221,7 @@ def main() -> int:
         certification = str(fp8_summary.get("runtime_certification") or "").upper()
         if certification == "PASS":
             status = "succeeded"
-        elif monitor_result.get("status") == "runtime_certification_failed":
+        elif monitor_result.get("status") in {"runtime_certification_failed", "probe_failed"}:
             status = "failed_recovered_from_container_logs"
         elif monitor_result.get("report_found"):
             status = "probe_completed_certification_failed"
