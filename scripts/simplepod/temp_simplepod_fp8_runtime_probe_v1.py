@@ -16,11 +16,16 @@ from simplepod_phase_timing import PhaseTimer, now_iso
 
 SCRIPT_ID = "TEMP_SIMPLEPOD_FP8_RUNTIME_PROBE_V1"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REPORT_PATH = REPO_ROOT / "logs" / "simplepod_fp8_runtime_probe_v1.json"
-CONTAINER_LOG_PATH = REPO_ROOT / "logs" / "simplepod_fp8_runtime_probe_container.log"
+RUN_TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
+REPORT_PATH = REPO_ROOT / "logs" / f"fp8_gate0_{RUN_TIMESTAMP}_report.json"
+RUNNER_LOG_PATH = REPO_ROOT / "logs" / f"fp8_gate0_{RUN_TIMESTAMP}_runner.log"
+CONTAINER_LOG_PATH = REPO_ROOT / "logs" / f"fp8_gate0_{RUN_TIMESTAMP}_container.log"
+INSTANCE_DETAIL_PATH_LOCAL = REPO_ROOT / "logs" / f"fp8_gate0_{RUN_TIMESTAMP}_instance.json"
+CREATE_PAYLOAD_PATH = REPO_ROOT / "logs" / f"fp8_gate0_{RUN_TIMESTAMP}_create_payload_sanitized.json"
 
-IMAGE_TAG = "0.3.04-blackwell-fp8-wan-gate0-mount-audit-v1"
+IMAGE_TAG = "0.3.06-blackwell-fp8-wan-gate0-path-resolution-v1"
 IMAGE_REF = f"ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:{IMAGE_TAG}"
+EXPECTED_IMAGE_REF = IMAGE_REF
 DATACENTER = "EU-PL-01"
 MIN_GPU_MEMORY_MB = 48_000
 PROBE_REPORT_PATH = "/tmp/fp8_wan_gate0_probe_v1.json"
@@ -220,6 +225,17 @@ def write_json(path: Path, payload: dict) -> None:
 def write_text(path: Path, payload: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(payload, encoding="utf-8")
+
+
+def log_runner(message: str) -> None:
+    RUNNER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with RUNNER_LOG_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(message.rstrip() + "\n")
+
+
+def print_status(message: str) -> None:
+    print(message, flush=True)
+    log_runner(message)
 
 
 def truncate(value, limit: int = 2000):
@@ -485,8 +501,6 @@ def runtime_payload(instance_market: str, template_id: int) -> dict:
         "instanceMarket": instance_market or "<selected_fp8_probe_market>",
         "instanceTemplate": f"/instances/templates/{template_id}",
         "envVariables": [
-            {"name": "AYL_IMAGE_TAG", "value": IMAGE_TAG},
-            {"name": "AYL_RUNTIME_VERSION", "value": IMAGE_TAG},
             {"name": "AYL_FP8_PROBE_REPORT_PATH", "value": PROBE_REPORT_PATH},
             {"name": "AYL_FP8_CERTIFICATION_REPORT_PATH", "value": CERTIFICATION_REPORT_PATH},
             {"name": "PYTHONUNBUFFERED", "value": "1"},
@@ -545,6 +559,86 @@ def safe_instance_observation(detail_json) -> dict:
                 if key in value
             }
     return summary
+
+
+def collect_image_fields(value, *, path: str = "", max_depth: int = 10, max_items: int = 80) -> list[dict]:
+    if max_depth < 0 or max_items <= 0:
+        return []
+    found: list[dict] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            item_path = path_join(path, key)
+            key_lower = str(key).lower().replace("_", "")
+            if isinstance(item, str) and any(token in key_lower for token in ("image", "tag", "defaulttag")):
+                found.append({"path": item_path, "key": str(key), "value": item})
+                if len(found) >= max_items:
+                    return found
+            elif isinstance(item, (dict, list)):
+                found.extend(collect_image_fields(item, path=item_path, max_depth=max_depth - 1, max_items=max_items - len(found)))
+                if len(found) >= max_items:
+                    return found
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            found.extend(collect_image_fields(item, path=path_join(path, index), max_depth=max_depth - 1, max_items=max_items - len(found)))
+            if len(found) >= max_items:
+                return found
+    return found
+
+
+def normalize_image_ref(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("docker://"):
+        text = text[len("docker://"):]
+    return text
+
+
+def image_ref_from_fields(fields: list[dict]) -> tuple[str, str]:
+    for field in fields:
+        value = normalize_image_ref(str(field.get("value") or ""))
+        if "ghcr.io/" in value and ":" in value.rsplit("/", 1)[-1]:
+            return value, str(field.get("path") or "")
+    image_name = ""
+    image_name_path = ""
+    image_tag = ""
+    image_tag_path = ""
+    for field in fields:
+        key = str(field.get("key") or "").lower().replace("_", "")
+        value = normalize_image_ref(str(field.get("value") or ""))
+        if not value:
+            continue
+        if not image_name and key in {"imagename", "image"} and "ghcr.io/" in value:
+            image_name = value.split(":", 1)[0]
+            image_name_path = str(field.get("path") or "")
+        if not image_tag and key in {"imagetag", "defaulttag", "tag"} and not value.startswith("ghcr.io/"):
+            image_tag = value
+            image_tag_path = str(field.get("path") or "")
+    if image_name and image_tag:
+        return f"{image_name}:{image_tag}", f"{image_name_path}+{image_tag_path}"
+    return "", ""
+
+
+def extract_effective_image_ref(detail_json) -> dict:
+    fields = collect_image_fields(detail_json)
+    image_ref, source_path = image_ref_from_fields(fields)
+    return {
+        "effective_image_ref": image_ref,
+        "effective_image_source_path": source_path,
+        "image_fields": fields[:40],
+    }
+
+
+def verify_effective_image(detail_json, expected_image_ref: str = EXPECTED_IMAGE_REF) -> dict:
+    extracted = extract_effective_image_ref(detail_json)
+    effective = extracted.get("effective_image_ref") or ""
+    status = "matched" if effective == expected_image_ref else ("missing_effective_image_ref" if not effective else "mismatch")
+    return {
+        "status": status,
+        "expected_image_ref": expected_image_ref,
+        "effective_image_ref": effective,
+        **extracted,
+    }
 
 
 def path_join(parent: str, child) -> str:
@@ -968,9 +1062,20 @@ def analyze_container_log_text(text: str) -> dict:
         if "runtime_certification" in stripped.lower():
             break
     traceback_tail = ""
+    exception_type_from_logs = ""
+    exception_message_from_logs = ""
     if "Traceback" in text:
         traceback_tail = "Traceback" + text.rsplit("Traceback", 1)[-1]
         traceback_tail = truncate(traceback_tail, 6000)
+        for line in reversed(traceback_tail.splitlines()):
+            stripped = line.strip()
+            if ":" not in stripped:
+                continue
+            candidate_type, candidate_message = stripped.split(":", 1)
+            if candidate_type.endswith("Error") or candidate_type.endswith("Exception"):
+                exception_type_from_logs = candidate_type.strip()
+                exception_message_from_logs = candidate_message.strip()
+                break
     return {
         "probe_output_markers_found": markers_found,
         "failure_markers": failure_markers,
@@ -980,6 +1085,8 @@ def analyze_container_log_text(text: str) -> dict:
         "structured_probe_fields": structured_probe_fields,
         "status_line_truncated": status_value,
         "traceback_tail": traceback_tail,
+        "exception_type_from_logs": exception_type_from_logs,
+        "exception_message_from_logs": exception_message_from_logs,
         "contains_pass": "PASS" in text,
         "contains_fail": "FAIL" in text,
         "contains_traceback": "Traceback" in text,
@@ -1093,15 +1200,30 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
     }
     selected = data.get("market_selection", {}).get("selected", {})
     selected_summary = selected.get("selected_summary", {})
+    if isinstance(environment, dict):
+        internal_image_tag = environment.get("image_tag", "")
+    elif isinstance(structured_probe_fields.get("environment"), str) and '"image_tag":"' in structured_probe_fields.get("environment", ""):
+        internal_image_tag = structured_probe_fields.get("environment", "").split('"image_tag":"', 1)[1].split('"', 1)[0]
+    else:
+        internal_image_tag = data.get("internal_image_tag", "")
     return {
         "script_id": SCRIPT_ID,
         "created_at": now_iso(),
         "status": status,
         "dry_run": not args.execute,
         "image_ref": IMAGE_REF,
+        "expected_image_ref": EXPECTED_IMAGE_REF,
+        "effective_image_ref": data.get("effective_image_ref", ""),
+        "effective_image_source_path": data.get("effective_image_source_path", ""),
+        "image_verification": data.get("image_verification", {}),
+        "template_result": data.get("template_result"),
         "template_id": args.template_id,
         "datacenter": DATACENTER,
         "report_path": str(REPORT_PATH),
+        "runner_log_path": str(RUNNER_LOG_PATH),
+        "container_log_path": str(CONTAINER_LOG_PATH),
+        "instance_json_path": str(INSTANCE_DETAIL_PATH_LOCAL),
+        "create_payload_sanitized_path": str(CREATE_PAYLOAD_PATH),
         "container_report_paths": {
             "probe": PROBE_REPORT_PATH,
             "certification": CERTIFICATION_REPORT_PATH,
@@ -1157,8 +1279,11 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
         "probe_build_id": structured_probe_fields.get("probe_build_id") or data.get("probe_build_id"),
         "report_schema_version": structured_probe_fields.get("report_schema_version") or data.get("report_schema_version"),
         "failure_stage": structured_probe_fields.get("failure_stage") or data.get("failure_stage"),
-        "exception_type": structured_probe_fields.get("exception_type") or data.get("exception_type"),
-        "exception_message": structured_probe_fields.get("exception_message") or data.get("exception_message"),
+        "exception_type": structured_probe_fields.get("exception_type") or data.get("exception_type") or data.get("exception_type_from_logs"),
+        "exception_message": structured_probe_fields.get("exception_message") or data.get("exception_message") or data.get("exception_message_from_logs"),
+        "traceback": structured_probe_fields.get("traceback") or data.get("traceback") or data.get("traceback_tail"),
+        "traceback_tail": data.get("traceback_tail", ""),
+        "internal_image_tag": internal_image_tag,
         "missing_path": structured_probe_fields.get("missing_path") or data.get("missing_path"),
         "resolved_path": structured_probe_fields.get("resolved_path") or data.get("resolved_path"),
         "exception_filename": structured_probe_fields.get("exception_filename") or data.get("exception_filename"),
@@ -1348,6 +1473,8 @@ def monitor_probe(
 ) -> dict:
     started_monotonic = time.monotonic()
     deadline = time.monotonic() + max(1, timeout_seconds)
+    failure_grace_deadline = None
+    failure_grace_seconds = 30
     detail_path = smoke.INSTANCE_DETAIL_PATH.format(id=instance_id)
     observations = []
     found_report = None
@@ -1400,6 +1527,10 @@ def monitor_probe(
             next_action = "return_report_found"
         elif runtime_certification_value == "PASS":
             next_action = "return_runtime_certification_pass"
+        elif explicit_failure_seen and runtime_certification_value == "FAIL" and report is None and not terminal_now:
+            if failure_grace_deadline is None:
+                failure_grace_deadline = min(deadline, time.monotonic() + failure_grace_seconds)
+            next_action = "wait_for_failure_report_after_fail_marker" if time.monotonic() < failure_grace_deadline else "return_runtime_certification_failed"
         elif explicit_failure_seen:
             next_action = "return_probe_failed" if structured_failure_seen and runtime_certification_value != "FAIL" else "return_runtime_certification_failed"
         elif terminal_now:
@@ -1421,6 +1552,7 @@ def monitor_probe(
             "runtime_certification_value": runtime_certification_value,
             "matched_failure_markers": matched_failure_markers,
             "structured_failure_seen": structured_failure_seen,
+            "failure_grace_active": bool(failure_grace_deadline and time.monotonic() < failure_grace_deadline),
             "probe_state": "probe_report_found" if report is not None else ("probe_terminal_without_report" if terminal_now else "probe_running_no_report_yet"),
             "next_action": next_action,
         }
@@ -1445,6 +1577,7 @@ def monitor_probe(
                         "runtime_certification_value": runtime_certification_value,
                         "matched_failure_markers": matched_failure_markers,
                         "structured_failure_seen": structured_failure_seen,
+                        "failure_grace_active": bool(failure_grace_deadline and time.monotonic() < failure_grace_deadline),
                         "next_action": next_action,
                     },
                     ensure_ascii=False,
@@ -1460,6 +1593,11 @@ def monitor_probe(
                 "status": "succeeded_recovered_from_container_logs",
                 "source": "container_logs",
             }
+            break
+        if explicit_failure_seen and runtime_certification_value == "FAIL" and report is None and not terminal_now:
+            if failure_grace_deadline is not None and time.monotonic() < failure_grace_deadline:
+                time.sleep(max(1, poll_interval_seconds))
+                continue
             break
         if explicit_failure_seen:
             break
@@ -1638,6 +1776,51 @@ def run_mock_tests() -> int:
 
     try:
         time.sleep = lambda _seconds: None
+
+        payload = runtime_payload("/instances/market/mock", 26108)
+        env_names = {item.get("name") for item in payload.get("envVariables", [])}
+        assert "AYL_IMAGE_TAG" not in env_names, payload
+        assert "AYL_RUNTIME_VERSION" not in env_names, payload
+        payload_text = json.dumps(smoke.redact_value("payload", payload), ensure_ascii=False)
+        assert "SECRET" not in payload_text.upper() and "TOKEN" not in payload_text.upper(), payload_text
+        announce("payload_uses_template_image_without_env_override")
+
+        matching_instance = {
+            "imageName": "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2",
+            "imageTag": "0.3.06-blackwell-fp8-wan-gate0-path-resolution-v1",
+        }
+        matching_verify = verify_effective_image(matching_instance)
+        assert matching_verify["status"] == "matched", matching_verify
+        assert matching_verify["effective_image_ref"] == EXPECTED_IMAGE_REF, matching_verify
+        announce("image_verification_expected_template_image_matches")
+
+        mismatch_instance = {
+            "imageName": "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2",
+            "imageTag": "0.3.04-blackwell-fp8-wan-gate0-mount-audit-v1",
+        }
+        mismatch_verify = verify_effective_image(mismatch_instance)
+        assert mismatch_verify["status"] == "mismatch", mismatch_verify
+        assert mismatch_verify["effective_image_ref"].endswith(":0.3.04-blackwell-fp8-wan-gate0-mount-audit-v1"), mismatch_verify
+        announce("image_verification_rejects_old_0304_tag")
+
+        missing_image_verify = verify_effective_image({"status": "running"})
+        assert missing_image_verify["status"] == "missing_effective_image_ref", missing_image_verify
+        announce("image_verification_requires_effective_image")
+
+        module_not_found_log = "\n".join(
+            [
+                "[TEMP_FP8_WAN_GATE0_PROBE_V1] runtime_certification=FAIL",
+                "Traceback (most recent call last):",
+                "  File \"/opt/ayl-simplepod-wan22-s2v-fp8-runtime-probe/temp_fp8_wan_gate0_probe_v1.py\", line 1, in <module>",
+                "    import missing_wan_dependency",
+                "ModuleNotFoundError: No module named 'missing_wan_dependency'",
+            ]
+        )
+        module_not_found_analysis = analyze_container_log_text(module_not_found_log)
+        assert module_not_found_analysis["exception_type_from_logs"] == "ModuleNotFoundError", module_not_found_analysis
+        assert "missing_wan_dependency" in module_not_found_analysis["exception_message_from_logs"], module_not_found_analysis
+        assert "Traceback" in module_not_found_analysis["traceback_tail"], module_not_found_analysis
+        announce("module_not_found_traceback_preserved_from_logs")
 
         require_classification(
             "startup_classification_created_pure",
@@ -1870,6 +2053,20 @@ def run_mock_tests() -> int:
         assert result["runtime_certification_value"] == "FAIL", result
         announce("probe_monitor_explicit_fail")
 
+        result, calls = run_monitor_mock(
+            [
+                running_empty,
+                running_empty,
+                make_mock_instance("running", "", report={"runtime_certification": "FAIL", "status": "failed", "exception_type": "ModuleNotFoundError"}),
+            ],
+            [fail_log, fail_log, None],
+            timeout_seconds=45,
+        )
+        assert result["status"] == "completed", result
+        assert result["report_found"] is True, result
+        assert calls["detail"] == 3, result
+        announce("probe_monitor_waits_briefly_for_report_after_fail_marker")
+
         structured_failure_no_cert = "\n".join(
             [
                 "[TEMP_FP8_WAN_GATE0_PROBE_V1] probe_build_id=gate0-mount-audit-v1",
@@ -2011,13 +2208,15 @@ def main() -> int:
     monitor_result = {}
     log_collection = {}
 
-    print(f"[{SCRIPT_ID}] START dry_run={str(not args.execute).lower()} template_id={args.template_id}", flush=True)
-    print(f"[{SCRIPT_ID}] image_ref={IMAGE_REF}", flush=True)
-    print(f"[{SCRIPT_ID}] no_wan=true no_models=true no_r2=true no_inference=true no_video=true", flush=True)
+    print_status(f"[{SCRIPT_ID}] START dry_run={str(not args.execute).lower()} template_id={args.template_id}")
+    print_status(f"[{SCRIPT_ID}] expected_image_ref={EXPECTED_IMAGE_REF}")
+    print_status(f"[{SCRIPT_ID}] image_source_of_truth=template_{args.template_id}_plus_effective_instance_verification")
+    print_status(f"[{SCRIPT_ID}] no_wan=true no_models=true no_r2=true no_inference=true no_video=true")
 
     valid, validation_status = validate_args(args)
     payload = runtime_payload(args.instance_market, args.template_id)
     data["request_payload_redacted"] = smoke.redact_value("request_payload", payload)
+    write_json(CREATE_PAYLOAD_PATH, data["request_payload_redacted"])
     data["fp8_report_retrieval"] = {
         "method": "instance_detail_or_log_field_scan",
         "container_report_paths": [PROBE_REPORT_PATH, CERTIFICATION_REPORT_PATH],
@@ -2029,7 +2228,7 @@ def main() -> int:
             status = validation_status
             data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
             write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}", flush=True)
+            print_status(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}")
             return 1
 
         if not args.execute:
@@ -2049,7 +2248,7 @@ def main() -> int:
             status = "dry_run_ready"
             data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
             write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}", flush=True)
+            print_status(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}")
             return 0
 
         with timer.phase("load_auth_env"):
@@ -2061,8 +2260,15 @@ def main() -> int:
             status = "missing_simplepod_api_key"
             data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
             write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}", flush=True)
+            print_status(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}")
             return 1
+
+        with timer.phase("template_readonly_audit"):
+            template_result = smoke.http_request(base_url, f"/instances/templates/{args.template_id}", api_key, timeout_seconds=30)
+        data["template_result"] = {
+            "request": safe_result(template_result),
+            "image_extraction": extract_effective_image_ref(template_result.get("json")),
+        }
 
         if args.instance_market:
             selected = {
@@ -2087,11 +2293,12 @@ def main() -> int:
             status = "blocked_no_fp8_probe_market_selected"
             data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
             write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}", flush=True)
+            print_status(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}")
             return 1
 
         payload = runtime_payload(market, args.template_id)
         data["request_payload_redacted"] = smoke.redact_value("request_payload", payload)
+        write_json(CREATE_PAYLOAD_PATH, data["request_payload_redacted"])
         with timer.phase("start_instance"):
             start_result = smoke.http_request(base_url, smoke.START_INSTANCE_PATH, api_key, method="POST", payload=payload, timeout_seconds=60)
         data["start_result"] = safe_result(start_result)
@@ -2101,7 +2308,41 @@ def main() -> int:
             status = "start_failed"
             data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
             write_json(REPORT_PATH, build_report(args, status, data))
-            print(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}", flush=True)
+            print_status(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}")
+            return 1
+
+        with timer.phase("verify_effective_image"):
+            observable_status, observable_observations = wait_for_instance_observable(
+                base_url,
+                api_key,
+                instance_id,
+                timeout_seconds=60,
+                poll_interval_seconds=max(1, args.poll_interval_seconds),
+            )
+        latest_observable_json = observable_observations[-1].get("request", {}) if observable_observations else {}
+        detail_result = smoke.http_request(base_url, smoke.INSTANCE_DETAIL_PATH.format(id=instance_id), api_key, timeout_seconds=30)
+        detail_json_for_image = detail_result.get("json")
+        if isinstance(detail_json_for_image, dict):
+            write_json(INSTANCE_DETAIL_PATH_LOCAL, detail_json_for_image)
+        image_verification = verify_effective_image(detail_json_for_image)
+        data["image_verification"] = image_verification
+        data["effective_image_ref"] = image_verification.get("effective_image_ref", "")
+        data["effective_image_source_path"] = image_verification.get("effective_image_source_path", "")
+        data["monitoring"] = {
+            "image_observable": {
+                "status": observable_status,
+                "observations": observable_observations[-10:],
+                "latest_observable_request": latest_observable_json,
+            }
+        }
+        if image_verification["status"] != "matched":
+            status = "image_mismatch"
+            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
+            write_json(REPORT_PATH, build_report(args, status, data))
+            print_status(
+                f"[{SCRIPT_ID}] DONE status={status} expected_image_ref={EXPECTED_IMAGE_REF} "
+                f"effective_image_ref={image_verification.get('effective_image_ref') or '<missing>'} report={REPORT_PATH}"
+            )
             return 1
 
         with timer.phase("wait_container_startup"):
@@ -2113,12 +2354,11 @@ def main() -> int:
                 args.poll_interval_seconds,
                 debug_startup_classification=args.debug_startup_classification,
             )
-        data["monitoring"] = {
-            "startup": {
-                key: value
-                for key, value in startup_result.items()
-                if key not in {"latest_detail_json", "latest_classification"}
-            },
+        data.setdefault("monitoring", {})
+        data["monitoring"]["startup"] = {
+            key: value
+            for key, value in startup_result.items()
+            if key not in {"latest_detail_json", "latest_classification"}
         }
         latest_detail_json = startup_result.get("latest_detail_json")
         latest_classification = startup_result.get("latest_classification") or {}
