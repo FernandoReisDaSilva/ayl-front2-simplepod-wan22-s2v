@@ -98,6 +98,138 @@ def import_module(name: str) -> dict[str, Any]:
         }
 
 
+def torchvision_c_extension_status() -> dict[str, Any]:
+    """Validate torchvision's compiled extension without requiring PyInit__C.
+
+    Recent torchvision wheels load the _C shared library through
+    torch.ops.load_library during `import torchvision`. Directly importing
+    torchvision._C can fail with PyInit__C even when the compiled ops are loaded
+    and usable, so nms remains the ABI gate below.
+    """
+    result: dict[str, Any] = {
+        "direct_import": {
+            "attempted": False,
+            "result": "NOT_STARTED",
+            "error_type": "",
+            "error_message": "",
+        },
+        "direct_import_status": "not_started",
+        "load_status": "not_started",
+        "file": "",
+        "has_ops": False,
+    }
+    try:
+        import torchvision.extension as torchvision_extension
+        from torchvision._internally_replaced_utils import _get_extension_path
+
+        result["file"] = str(_get_extension_path("_C"))
+        has_ops_fn = getattr(torchvision_extension, "_has_ops", None)
+        result["has_ops"] = bool(has_ops_fn()) if callable(has_ops_fn) else bool(
+            getattr(torchvision_extension, "_HAS_OPS", False)
+        )
+        result["load_status"] = "ok" if result["has_ops"] else "failed"
+    except Exception as exc:  # noqa: BLE001 - diagnostic smoke.
+        result.update(
+            {
+                "load_status": "failed",
+                "error_type": type(exc).__name__,
+                "error_truncated": str(exc)[:500],
+                "traceback_tail": traceback.format_exc()[-2000:],
+            }
+        )
+        return result
+
+    try:
+        result["direct_import"]["attempted"] = True
+        module = importlib.import_module("torchvision._C")
+        direct_file = str(getattr(module, "__file__", "") or "")
+        result["direct_import"].update(
+            {
+                "result": "IMPORT_OK",
+                "file": direct_file,
+            }
+        )
+        result.update(
+            {
+                "direct_import_status": "ok",
+                "direct_import_file": direct_file,
+            }
+        )
+    except ImportError as exc:
+        message = str(exc)
+        direct_result = "EXPECTED_PYINIT_BEHAVIOR" if "PyInit__C" in message else "IMPORT_ERROR"
+        result["direct_import"].update(
+            {
+                "result": direct_result,
+                "error_type": type(exc).__name__,
+                "error_message": message,
+            }
+        )
+        result.update(
+            {
+                "direct_import_status": "expected_pyinit_behavior"
+                if direct_result == "EXPECTED_PYINIT_BEHAVIOR"
+                else "failed",
+                "direct_import_error_type": type(exc).__name__,
+                "direct_import_error_truncated": message[:500],
+            }
+        )
+        if "PyInit__C" not in message or not result["has_ops"]:
+            result["load_status"] = "failed"
+    except Exception as exc:  # noqa: BLE001 - diagnostic smoke.
+        result["direct_import"].update(
+            {
+                "result": "FAILED",
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            }
+        )
+        result.update(
+            {
+                "direct_import_status": "failed",
+                "direct_import_error_type": type(exc).__name__,
+                "direct_import_error_truncated": str(exc)[:500],
+                "direct_import_traceback_tail": traceback.format_exc()[-2000:],
+                "load_status": "failed",
+            }
+        )
+
+    return result
+
+
+def torch_stack_abi_summary(torch_stack: dict[str, Any], status: str) -> dict[str, Any]:
+    torchvision_c = torch_stack.get("torchvision_c_extension_status", {})
+    if not isinstance(torchvision_c, dict):
+        torchvision_c = {}
+    direct_import = torchvision_c.get("direct_import", {})
+    if not isinstance(direct_import, dict):
+        direct_import = {}
+
+    native_extension_loaded = bool(torchvision_c.get("has_ops"))
+    ops_namespace_available = bool(torch_stack.get("torchvision_ops_namespace_available"))
+    nms_import_ok = bool(torch_stack.get("torchvision_nms_imported"))
+    nms_execution_ok = bool(torch_stack.get("torchvision_nms_execution_ok"))
+    abi_pass = native_extension_loaded and ops_namespace_available and nms_import_ok and nms_execution_ok
+    abi_validation = "PASS" if abi_pass else "FAIL"
+    if status.startswith("skipped_") and not torch_stack:
+        abi_validation = "NOT_RUN"
+
+    return {
+        "torchvision_c_direct_import": {
+            "attempted": bool(direct_import.get("attempted")),
+            "result": str(direct_import.get("result") or "NOT_ATTEMPTED"),
+            "error_type": str(direct_import.get("error_type") or ""),
+            "error_message": str(direct_import.get("error_message") or ""),
+        },
+        "torchvision_native_extension_loaded": native_extension_loaded,
+        "torchvision_ops_namespace_available": ops_namespace_available,
+        "torchvision_nms_import_ok": nms_import_ok,
+        "torchvision_nms_execution_ok": nms_execution_ok,
+        "abi_validation_method": "torchvision_import_plus_real_nms_execution",
+        "abi_validation": abi_validation,
+    }
+
+
 def dependency_validation_summary(report: dict[str, Any]) -> dict[str, Any]:
     torch_stack = report.get("torch_stack", {}) if isinstance(report.get("torch_stack"), dict) else {}
     wan_s2v = report.get("wan_s2v_import", {}) if isinstance(report.get("wan_s2v_import"), dict) else {}
@@ -108,7 +240,7 @@ def dependency_validation_summary(report: dict[str, Any]) -> dict[str, Any]:
         result = "SKIPPED"
     else:
         result = "FAIL"
-    return {
+    summary = {
         "torch": {
             "version": torch_stack.get("torch_version", ""),
         },
@@ -137,6 +269,8 @@ def dependency_validation_summary(report: dict[str, Any]) -> dict[str, Any]:
         or torch_stack.get("error_truncated")
         or wan_s2v.get("error_truncated"),
     }
+    summary.update(torch_stack_abi_summary(torch_stack, status))
+    return summary
 
 
 def parse_args() -> argparse.Namespace:
@@ -207,8 +341,13 @@ def main() -> int:
         import torchaudio
         import torchvision
         import torchvision.transforms.functional as TF  # noqa: F401
-        torchvision_c = importlib.import_module("torchvision._C")
         from torchvision.ops import nms
+
+        torchvision_c = torchvision_c_extension_status()
+        if torchvision_c.get("load_status") != "ok":
+            raise RuntimeError(f"torchvision C extension load failed: {torchvision_c}")
+
+        torchvision_ops = torch.ops.torchvision
 
         boxes = torch.tensor(
             [[0.0, 0.0, 10.0, 10.0], [1.0, 1.0, 11.0, 11.0]],
@@ -216,7 +355,6 @@ def main() -> int:
         )
         scores = torch.tensor([0.9, 0.8], dtype=torch.float32)
         nms_result = nms(boxes, scores, 0.5)
-        torchvision_ops = torch.ops.torchvision
         torchvision_ops_sample = sorted(name for name in dir(torchvision_ops) if not name.startswith("_"))[:50]
         report["torch_stack"] = {
             "status": "ok",
@@ -228,12 +366,15 @@ def main() -> int:
             "torchao_version": getattr(torchao, "__version__", ""),
             "torchvision_transforms_functional_imported": True,
             "torchvision_nms_imported": True,
+            "torchvision_nms_execution_ok": True,
             "torchvision_nms_result": nms_result.detach().cpu().tolist(),
             "torchvision_ops_ok": True,
+            "torchvision_ops_namespace_available": True,
             "torchvision_ops_repr": repr(torchvision_ops),
             "torchvision_ops_sample": torchvision_ops_sample,
-            "torchvision_c_extension_imported": True,
-            "torchvision_c_extension_file": str(getattr(torchvision_c, "__file__", "") or ""),
+            "torchvision_c_extension_imported": torchvision_c.get("direct_import_status") == "ok",
+            "torchvision_c_extension_status": torchvision_c,
+            "torchvision_c_extension_file": str(torchvision_c.get("file") or torchvision_c.get("direct_import_file") or ""),
         }
     except Exception as exc:  # noqa: BLE001 - this is an ABI/operator smoke.
         message = str(exc)

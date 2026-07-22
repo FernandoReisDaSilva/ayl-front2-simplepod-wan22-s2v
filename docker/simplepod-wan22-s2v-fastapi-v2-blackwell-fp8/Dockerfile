@@ -34,7 +34,8 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
         "torchvision==${AYL_TORCHVISION_VERSION}" \
         "torchaudio==${AYL_TORCHAUDIO_VERSION}" \
         --index-url https://download.pytorch.org/whl/cu128 \
-    && python -m pip install --no-cache-dir "torchao==${AYL_TORCHAO_VERSION}" --index-url https://download.pytorch.org/whl/cu128
+    && python -m pip install --no-cache-dir "torchao==${AYL_TORCHAO_VERSION}" --index-url https://download.pytorch.org/whl/cu128 \
+    && python -c "import torch, torchvision, torchaudio, torchao; print(torch.__version__, torchvision.__version__, torchaudio.__version__, torchao.__version__, torch.version.cuda)"
 
 COPY docker/simplepod-wan22-s2v-fastapi-v2-blackwell-fp8/requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
