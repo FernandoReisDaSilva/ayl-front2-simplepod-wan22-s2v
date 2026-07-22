@@ -8,8 +8,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     TORCH_CUDA_ARCH_LIST="12.0" \
     AYL_TORCH_VERSION=2.11.0 \
+    AYL_TORCHVISION_VERSION=0.26.0 \
+    AYL_TORCHAUDIO_VERSION=2.11.0 \
     AYL_TORCHAO_VERSION=0.17.0 \
-    AYL_IMAGE_TAG=0.3.07-blackwell-fp8-wan-gate0-exception-capture-v1 \
+    AYL_IMAGE_TAG=0.3.08-blackwell-fp8-wan-gate0-dependencies-v1 \
     AYL_WAN22_GIT_COMMIT=42bf4cfaa384bc21833865abc2f9e6c0e67233dc \
     AYL_FP8_PROBE_REPORT_PATH=/tmp/fp8_runtime_probe_v1.json \
     AYL_FP8_WAN_GATE0_REPORT_PATH=/tmp/fp8_wan_gate0_probe_v1.json \
@@ -27,7 +29,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir "torch==${AYL_TORCH_VERSION}" --index-url https://download.pytorch.org/whl/cu128 \
+    && python -m pip install --no-cache-dir \
+        "torch==${AYL_TORCH_VERSION}" \
+        "torchvision==${AYL_TORCHVISION_VERSION}" \
+        "torchaudio==${AYL_TORCHAUDIO_VERSION}" \
+        --index-url https://download.pytorch.org/whl/cu128 \
     && python -m pip install --no-cache-dir "torchao==${AYL_TORCHAO_VERSION}" --index-url https://download.pytorch.org/whl/cu128
 
 COPY docker/simplepod-wan22-s2v-fastapi-v2-blackwell-fp8/requirements.txt .
@@ -45,8 +51,10 @@ RUN python patches/patch_wan22_autocast_deprecated.py /opt/Wan2.2
 COPY docker/simplepod-wan22-s2v-fastapi-v2-blackwell-fp8/app ./app
 COPY scripts/fp8/temp_fp8_runtime_probe_v1.py ./temp_fp8_runtime_probe_v1.py
 COPY scripts/fp8/temp_fp8_build_smoke_v1.py ./temp_fp8_build_smoke_v1.py
+COPY scripts/fp8/temp_fp8_wan_import_smoke_v1.py ./temp_fp8_wan_import_smoke_v1.py
 COPY scripts/fp8/temp_fp8_wan_gate0_probe_v1.py ./temp_fp8_wan_gate0_probe_v1.py
 RUN python ./temp_fp8_build_smoke_v1.py
+RUN python ./temp_fp8_wan_import_smoke_v1.py
 RUN python -m py_compile ./temp_fp8_wan_gate0_probe_v1.py
 
 CMD ["python", "temp_fp8_wan_gate0_probe_v1.py"]

@@ -6,7 +6,7 @@ on:
       image_tag:
         description: "Experimental FP8 Wan Gate 0 image tag."
         required: true
-        default: "0.3.07-blackwell-fp8-wan-gate0-exception-capture-v1"
+        default: "0.3.08-blackwell-fp8-wan-gate0-dependencies-v1"
         type: string
 
 permissions:
@@ -47,6 +47,7 @@ jobs:
         run: |
           python3 -m py_compile scripts/fp8/temp_fp8_runtime_probe_v1.py
           python3 -m py_compile scripts/fp8/temp_fp8_build_smoke_v1.py
+          python3 -m py_compile scripts/fp8/temp_fp8_wan_import_smoke_v1.py
           python3 -m py_compile scripts/fp8/temp_fp8_wan_gate0_probe_v1.py
           python3 scripts/fp8/temp_fp8_wan_gate0_probe_v1.py --run-mock-tests
 
@@ -59,6 +60,25 @@ jobs:
 
       - name: Validate TorchAO imports inside image
         run: docker run --rm --entrypoint python "${IMAGE_NAME}:${{ inputs.image_tag }}" ./temp_fp8_build_smoke_v1.py
+
+      - name: Validate PyTorch vision/audio ABI and Wan imports inside image
+        run: |
+          rm -f fp8_dependency_validation.json
+          docker run --rm \
+            --entrypoint python \
+            -v "${PWD}:/workspace" \
+            "${IMAGE_NAME}:${{ inputs.image_tag }}" \
+            ./temp_fp8_wan_import_smoke_v1.py \
+            --report-path /workspace/fp8_dependency_validation.json
+          python3 -m json.tool fp8_dependency_validation.json
+
+      - name: Upload FP8 dependency validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fp8_dependency_validation
+          path: fp8_dependency_validation.json
+          if-no-files-found: warn
 
       - name: Validate Wan Gate 0 mock inside image
         run: docker run --rm --entrypoint python "${IMAGE_NAME}:${{ inputs.image_tag }}" ./temp_fp8_wan_gate0_probe_v1.py --mock-stage success --report-path /tmp/fp8_wan_gate0_mock.json

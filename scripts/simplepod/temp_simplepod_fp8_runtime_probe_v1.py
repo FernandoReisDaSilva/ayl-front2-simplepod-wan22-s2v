@@ -23,7 +23,7 @@ CONTAINER_LOG_PATH = REPO_ROOT / "logs" / f"fp8_gate0_{RUN_TIMESTAMP}_container.
 INSTANCE_DETAIL_PATH_LOCAL = REPO_ROOT / "logs" / f"fp8_gate0_{RUN_TIMESTAMP}_instance.json"
 CREATE_PAYLOAD_PATH = REPO_ROOT / "logs" / f"fp8_gate0_{RUN_TIMESTAMP}_create_payload_sanitized.json"
 
-IMAGE_TAG = "0.3.07-blackwell-fp8-wan-gate0-exception-capture-v1"
+IMAGE_TAG = "0.3.08-blackwell-fp8-wan-gate0-dependencies-v1"
 IMAGE_REF = f"ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:{IMAGE_TAG}"
 EXPECTED_IMAGE_REF = IMAGE_REF
 DATACENTER = "EU-PL-01"

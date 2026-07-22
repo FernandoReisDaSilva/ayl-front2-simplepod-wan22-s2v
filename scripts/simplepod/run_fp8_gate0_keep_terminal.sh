@@ -25,7 +25,7 @@ LOG_PATH="logs/fp8_gate0_keep_terminal_${TIMESTAMP}.log"
 
 echo "[FP8_GATE0] repo=$REPO_ROOT"
 echo "[FP8_GATE0] log=$LOG_PATH"
-echo "[FP8_GATE0] image=ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.3.07-blackwell-fp8-wan-gate0-exception-capture-v1"
+echo "[FP8_GATE0] image=ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.3.08-blackwell-fp8-wan-gate0-dependencies-v1"
 echo "[FP8_GATE0] template_id=26108"
 echo "[FP8_GATE0] starting paid SimplePod probe"
 
