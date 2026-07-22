@@ -21,7 +21,7 @@ REPORT_SCHEMA_VERSION = "fp8-wan-gate0-v3"
 DEFAULT_REPORT_PATH = Path(os.getenv("AYL_FP8_WAN_GATE0_REPORT_PATH", "/tmp/fp8_wan_gate0_probe_v1.json"))
 DEFAULT_MODEL_DIR = Path(os.getenv("WAN22_S2V_MODEL_DIR", "/mnt/ayl_models/wan2.2/Wan2.2-S2V-14B"))
 DEFAULT_WAN_REPO_DIR = Path(os.getenv("WAN22_REPO_DIR", "/opt/Wan2.2"))
-DEFAULT_IMAGE_TAG = os.getenv("AYL_IMAGE_TAG", "0.3.05-blackwell-fp8-wan-gate0-mount-audit-v2")
+DEFAULT_IMAGE_TAG = os.getenv("AYL_IMAGE_TAG", "0.3.07-blackwell-fp8-wan-gate0-exception-capture-v1")
 DEFAULT_WAN_COMMIT = os.getenv("AYL_WAN22_GIT_COMMIT", "42bf4cfaa384bc21833865abc2f9e6c0e67233dc")
 TASK = "s2v-14B"
 MIN_LINEAR_PARAMS = int(os.getenv("AYL_FP8_GATE0_MIN_LINEAR_PARAMS", "16384"))
@@ -680,12 +680,32 @@ def quantization_plan() -> dict[str, Any]:
 
 def append_error(report: dict[str, Any], stage: str, exc: BaseException) -> None:
     traceback_text = traceback.format_exc()
+    missing_module_name = getattr(exc, "name", "") if isinstance(exc, ModuleNotFoundError) else ""
+    missing_module_path = getattr(exc, "path", "") if isinstance(exc, ModuleNotFoundError) else ""
     error = {
         "stage": stage,
         "error_type": type(exc).__name__,
+        "exception_type": type(exc).__name__,
+        "exception_message": str(exc),
+        "exception_repr": repr(exc),
+        "exception_traceback": traceback_text,
+        "missing_module_name": str(missing_module_name or ""),
+        "missing_module_path": str(missing_module_path or ""),
         "error_truncated": truncate(exc),
         "traceback_tail": traceback_text.splitlines()[-24:],
     }
+    report.update(
+        {
+            "failure_stage": stage,
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+            "exception_repr": repr(exc),
+            "exception_traceback": traceback_text,
+            "traceback": traceback_text,
+            "missing_module_name": str(missing_module_name or ""),
+            "missing_module_path": str(missing_module_path or ""),
+        }
+    )
     if isinstance(exc, FileNotFoundError):
         filename = getattr(exc, "filename", None)
         resolved_path = str(Path(filename).expanduser().resolve(strict=False)) if filename else ""
@@ -714,6 +734,7 @@ def append_error(report: dict[str, Any], stage: str, exc: BaseException) -> None
                 "exception_type": type(exc).__name__,
                 "exception_message": str(exc),
                 "traceback": traceback_text,
+                "exception_traceback": traceback_text,
             }
         )
     report.setdefault("errors", []).append(
@@ -726,6 +747,10 @@ def emit_failure_diagnostics(report: dict[str, Any]) -> None:
         "failure_stage",
         "exception_type",
         "exception_message",
+        "exception_repr",
+        "exception_traceback",
+        "missing_module_name",
+        "missing_module_path",
         "missing_path",
         "resolved_path",
         "exception_filename",
@@ -736,6 +761,13 @@ def emit_failure_diagnostics(report: dict[str, Any]) -> None:
     ):
         if key in report:
             emit_stage(f"{key}={report.get(key)}")
+    for key in (
+        "exception_message",
+        "exception_repr",
+        "exception_traceback",
+    ):
+        if key in report:
+            emit_structured_field(f"{key}_json", report.get(key), limit=12000)
 
 
 def resolve_wan_config(task: str):
@@ -1116,7 +1148,7 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
         report["failure_stage"] = current_failure_stage(report)
         append_error(report, report["failure_stage"], exc)
         emit_failure_diagnostics(report)
-        emit_stage("runtime_certification=FAIL", failure_stage=report["failure_stage"], exception_type=type(exc).__name__)
+        emit_stage("runtime_certification_pending=FAIL", failure_stage=report["failure_stage"], exception_type=type(exc).__name__)
     finally:
         cleanup_started = time.monotonic()
         if restore_from_pretrained is not None:
@@ -1151,9 +1183,9 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
         emit_stage("cuda_memory_after_cleanup", allocated=cleanup_memory.get("allocated_gb"), reserved=cleanup_memory.get("reserved_gb"), peak=cleanup_memory.get("peak_allocated_gb"))
         report["timings"]["runtime_seconds"] = stage_seconds(started)
         report["runtime_certification"] = "PASS" if report.get("status") == "succeeded" else "FAIL"
-        emit_stage("runtime_certification=" + report["runtime_certification"])
         write_json(args.report_path, report)
         emit_stage("report_written", report=args.report_path)
+        emit_stage("runtime_certification=" + report["runtime_certification"])
         emit_stage("probe_exit", exit_code=0 if report["runtime_certification"] == "PASS" else 1)
     return report
 
@@ -1409,6 +1441,20 @@ def run_mock_tests() -> int:
         assert missing_config_json["exception_message"], missing_config_json
         print("wan_load_missing_config: PASS", flush=True)
 
+        module_missing_report = tmp / "mock_module_not_found.json"
+        module_missing = run_mock_subprocess("wan_module_not_found", module_missing_report)
+        assert module_missing.returncode != 0, module_missing.stdout + module_missing.stderr
+        module_missing_json = json.loads(module_missing_report.read_text(encoding="utf-8"))
+        assert module_missing_json["failure_stage"] == "wan_load", module_missing_json
+        assert module_missing_json["exception_type"] == "ModuleNotFoundError", module_missing_json
+        assert "mock_missing_dependency" in module_missing_json["exception_message"], module_missing_json
+        assert "ModuleNotFoundError" in module_missing_json["exception_traceback"], module_missing_json
+        assert module_missing_json["missing_module_name"] == "mock_missing_dependency", module_missing_json
+        assert "exception_message_json=" in module_missing.stdout, module_missing.stdout
+        assert "exception_traceback_json=" in module_missing.stdout, module_missing.stdout
+        assert module_missing.stdout.rfind("report_written") < module_missing.stdout.rfind("runtime_certification=FAIL"), module_missing.stdout
+        print("wan_load_module_not_found_preserved: PASS", flush=True)
+
         success_report = tmp / "mock_success.json"
         success = run_mock_subprocess("success", success_report)
         assert success.returncode == 0, success.stdout + success.stderr
@@ -1474,6 +1520,24 @@ def run_mock_gate0(args: argparse.Namespace) -> dict[str, Any]:
         "wan_missing_checkpoint": Path("/mock/missing/Wan2.2-S2V-14B"),
         "wan_missing_config": Path("/mock/Wan2.2/wan/configs/__init__.py"),
     }
+    if args.mock_stage == "wan_module_not_found":
+        try:
+            raise ModuleNotFoundError("No module named 'mock_missing_dependency'", name="mock_missing_dependency")
+        except ModuleNotFoundError as exc:
+            report["status"] = "failed"
+            report["failure_stage"] = "wan_load"
+            append_error(report, "wan_load", exc)
+            emit_failure_diagnostics(report)
+        report["memory"]["cuda_memory_after_cleanup"] = {"allocated_gb": 0.0, "reserved_gb": 0.0, "peak_allocated_gb": 1.0}
+        report["cleanup"] = {"cleanup_seconds": 0.1, "cuda_memory_after_cleanup": report["memory"]["cuda_memory_after_cleanup"]}
+        emit_stage("cuda_memory_after_cleanup", allocated=0.0, reserved=0.0, peak=1.0)
+        report["timings"]["runtime_seconds"] = stage_seconds(started)
+        report["runtime_certification"] = "FAIL"
+        write_json(args.report_path, report)
+        emit_stage("report_written", report=args.report_path)
+        emit_stage("runtime_certification=FAIL", failure_stage="wan_load", exception_type="ModuleNotFoundError")
+        emit_stage("probe_exit", exit_code=1)
+        return report
     if args.mock_stage in missing_path_by_stage:
         try:
             raise_missing_path(missing_path_by_stage[args.mock_stage], f"Mock missing path for {args.mock_stage}")
@@ -1487,9 +1551,9 @@ def run_mock_gate0(args: argparse.Namespace) -> dict[str, Any]:
         emit_stage("cuda_memory_after_cleanup", allocated=0.0, reserved=0.0, peak=1.0)
         report["timings"]["runtime_seconds"] = stage_seconds(started)
         report["runtime_certification"] = "FAIL"
-        emit_stage("runtime_certification=FAIL", failure_stage="wan_load", exception_type="FileNotFoundError")
         write_json(args.report_path, report)
         emit_stage("report_written", report=args.report_path)
+        emit_stage("runtime_certification=FAIL", failure_stage="wan_load", exception_type="FileNotFoundError")
         emit_stage("probe_exit", exit_code=1)
         return report
 
@@ -1529,9 +1593,9 @@ def run_mock_gate0(args: argparse.Namespace) -> dict[str, Any]:
     emit_stage("cuda_memory_after_cleanup", allocated=0.0, reserved=0.0, peak=40.0)
     report["timings"]["runtime_seconds"] = stage_seconds(started)
     report["runtime_certification"] = "PASS" if report["status"] == "succeeded" else "FAIL"
-    emit_stage("runtime_certification=" + report["runtime_certification"])
     write_json(args.report_path, report)
     emit_stage("report_written", report=args.report_path)
+    emit_stage("runtime_certification=" + report["runtime_certification"])
     emit_stage("probe_exit", exit_code=0 if report["runtime_certification"] == "PASS" else 1)
     return report
 

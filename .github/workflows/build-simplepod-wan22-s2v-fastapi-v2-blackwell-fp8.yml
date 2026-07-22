@@ -6,7 +6,7 @@ on:
       image_tag:
         description: "Experimental FP8 Wan Gate 0 image tag."
         required: true
-        default: "0.3.06-blackwell-fp8-wan-gate0-path-resolution-v1"
+        default: "0.3.07-blackwell-fp8-wan-gate0-exception-capture-v1"
         type: string
 
 permissions:

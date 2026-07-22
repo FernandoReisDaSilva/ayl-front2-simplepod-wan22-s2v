@@ -23,7 +23,7 @@ CONTAINER_LOG_PATH = REPO_ROOT / "logs" / f"fp8_gate0_{RUN_TIMESTAMP}_container.
 INSTANCE_DETAIL_PATH_LOCAL = REPO_ROOT / "logs" / f"fp8_gate0_{RUN_TIMESTAMP}_instance.json"
 CREATE_PAYLOAD_PATH = REPO_ROOT / "logs" / f"fp8_gate0_{RUN_TIMESTAMP}_create_payload_sanitized.json"
 
-IMAGE_TAG = "0.3.06-blackwell-fp8-wan-gate0-path-resolution-v1"
+IMAGE_TAG = "0.3.07-blackwell-fp8-wan-gate0-exception-capture-v1"
 IMAGE_REF = f"ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:{IMAGE_TAG}"
 EXPECTED_IMAGE_REF = IMAGE_REF
 DATACENTER = "EU-PL-01"
@@ -129,6 +129,13 @@ STRUCTURED_LOG_FIELDS = (
     "failure_stage",
     "exception_type",
     "exception_message",
+    "exception_message_json",
+    "exception_repr",
+    "exception_repr_json",
+    "exception_traceback",
+    "exception_traceback_json",
+    "missing_module_name",
+    "missing_module_path",
     "missing_path",
     "resolved_path",
     "exception_filename",
@@ -638,6 +645,24 @@ def verify_effective_image(detail_json, expected_image_ref: str = EXPECTED_IMAGE
         "expected_image_ref": expected_image_ref,
         "effective_image_ref": effective,
         **extracted,
+    }
+
+
+def build_tag_audit(template_image_ref: str, effective_image_ref: str, internal_image_tag: str, expected_image_ref: str = EXPECTED_IMAGE_REF) -> dict:
+    expected_tag = expected_image_ref.rsplit(":", 1)[-1] if ":" in expected_image_ref.rsplit("/", 1)[-1] else ""
+    effective_match = effective_image_ref == expected_image_ref
+    template_match = template_image_ref == expected_image_ref
+    internal_match = internal_image_tag == expected_tag
+    return {
+        "tag_audit_status": "match" if template_match and effective_match and internal_match else "mismatch",
+        "template_image_ref": template_image_ref,
+        "expected_image_ref": expected_image_ref,
+        "effective_image_ref": effective_image_ref,
+        "internal_image_tag": internal_image_tag,
+        "expected_image_tag": expected_tag,
+        "template_matches_expected": template_match,
+        "effective_matches_expected": effective_match,
+        "internal_tag_matches_expected": internal_match,
     }
 
 
@@ -1170,6 +1195,25 @@ def decoded_field_by_name(text_fields: list[dict], name: str) -> str:
     return ""
 
 
+def first_non_empty(*values):
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and value == "":
+            continue
+        return value
+    return None
+
+
+def decode_json_structured_string(value):
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
 def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
     fp8_report = data.get("fp8_runtime_report")
     fp8_summary = summarize_fp8_report(fp8_report)
@@ -1183,6 +1227,12 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
     storage_direct_inventory, storage_direct_inventory_parse_error = structured_value_with_parse_error(structured_probe_fields, "storage_direct_inventory_json", data.get("storage_direct_inventory"))
     model_path_candidates, model_path_candidates_parse_error = structured_value_with_parse_error(structured_probe_fields, "model_path_candidates_json", data.get("model_path_candidates"))
     model_path_validation, model_path_validation_parse_error = structured_value_with_parse_error(structured_probe_fields, "model_path_validation_json", data.get("model_path_validation"))
+    exception_message_json, exception_message_json_parse_error = structured_value_with_parse_error(structured_probe_fields, "exception_message_json")
+    exception_repr_json, exception_repr_json_parse_error = structured_value_with_parse_error(structured_probe_fields, "exception_repr_json")
+    exception_traceback_json, exception_traceback_json_parse_error = structured_value_with_parse_error(structured_probe_fields, "exception_traceback_json")
+    exception_message_json = decode_json_structured_string(exception_message_json)
+    exception_repr_json = decode_json_structured_string(exception_repr_json)
+    exception_traceback_json = decode_json_structured_string(exception_traceback_json)
     structured_parse_errors = {
         key: value
         for key, value in {
@@ -1195,6 +1245,9 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
             "storage_direct_inventory_json": storage_direct_inventory_parse_error,
             "model_path_candidates_json": model_path_candidates_parse_error,
             "model_path_validation_json": model_path_validation_parse_error,
+            "exception_message_json": exception_message_json_parse_error,
+            "exception_repr_json": exception_repr_json_parse_error,
+            "exception_traceback_json": exception_traceback_json_parse_error,
         }.items()
         if value
     }
@@ -1206,6 +1259,12 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
         internal_image_tag = structured_probe_fields.get("environment", "").split('"image_tag":"', 1)[1].split('"', 1)[0]
     else:
         internal_image_tag = data.get("internal_image_tag", "")
+    template_image_ref = data.get("template_image_ref") or data.get("template_result", {}).get("image_extraction", {}).get("effective_image_ref", "")
+    tag_audit = build_tag_audit(
+        template_image_ref,
+        data.get("effective_image_ref", ""),
+        internal_image_tag,
+    )
     return {
         "script_id": SCRIPT_ID,
         "created_at": now_iso(),
@@ -1213,9 +1272,12 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
         "dry_run": not args.execute,
         "image_ref": IMAGE_REF,
         "expected_image_ref": EXPECTED_IMAGE_REF,
+        "template_image_ref": template_image_ref,
         "effective_image_ref": data.get("effective_image_ref", ""),
         "effective_image_source_path": data.get("effective_image_source_path", ""),
         "image_verification": data.get("image_verification", {}),
+        "tag_audit": tag_audit,
+        "tag_audit_status": tag_audit["tag_audit_status"],
         "template_result": data.get("template_result"),
         "template_id": args.template_id,
         "datacenter": DATACENTER,
@@ -1279,11 +1341,15 @@ def build_report(args: argparse.Namespace, status: str, data: dict) -> dict:
         "probe_build_id": structured_probe_fields.get("probe_build_id") or data.get("probe_build_id"),
         "report_schema_version": structured_probe_fields.get("report_schema_version") or data.get("report_schema_version"),
         "failure_stage": structured_probe_fields.get("failure_stage") or data.get("failure_stage"),
-        "exception_type": structured_probe_fields.get("exception_type") or data.get("exception_type") or data.get("exception_type_from_logs"),
-        "exception_message": structured_probe_fields.get("exception_message") or data.get("exception_message") or data.get("exception_message_from_logs"),
-        "traceback": structured_probe_fields.get("traceback") or data.get("traceback") or data.get("traceback_tail"),
+        "exception_type": first_non_empty(structured_probe_fields.get("exception_type"), data.get("exception_type"), data.get("exception_type_from_logs")),
+        "exception_message": first_non_empty(exception_message_json, structured_probe_fields.get("exception_message"), data.get("exception_message"), data.get("exception_message_from_logs")),
+        "exception_repr": first_non_empty(exception_repr_json, structured_probe_fields.get("exception_repr"), data.get("exception_repr")),
+        "exception_traceback": first_non_empty(exception_traceback_json, structured_probe_fields.get("exception_traceback"), data.get("exception_traceback"), data.get("traceback_tail")),
+        "traceback": first_non_empty(exception_traceback_json, structured_probe_fields.get("traceback"), data.get("traceback"), data.get("traceback_tail")),
         "traceback_tail": data.get("traceback_tail", ""),
         "internal_image_tag": internal_image_tag,
+        "missing_module_name": first_non_empty(structured_probe_fields.get("missing_module_name"), data.get("missing_module_name")),
+        "missing_module_path": first_non_empty(structured_probe_fields.get("missing_module_path"), data.get("missing_module_path")),
         "missing_path": structured_probe_fields.get("missing_path") or data.get("missing_path"),
         "resolved_path": structured_probe_fields.get("resolved_path") or data.get("resolved_path"),
         "exception_filename": structured_probe_fields.get("exception_filename") or data.get("exception_filename"),
@@ -1787,7 +1853,7 @@ def run_mock_tests() -> int:
 
         matching_instance = {
             "imageName": "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2",
-            "imageTag": "0.3.06-blackwell-fp8-wan-gate0-path-resolution-v1",
+            "imageTag": IMAGE_TAG,
         }
         matching_verify = verify_effective_image(matching_instance)
         assert matching_verify["status"] == "matched", matching_verify
@@ -1821,6 +1887,74 @@ def run_mock_tests() -> int:
         assert "missing_wan_dependency" in module_not_found_analysis["exception_message_from_logs"], module_not_found_analysis
         assert "Traceback" in module_not_found_analysis["traceback_tail"], module_not_found_analysis
         announce("module_not_found_traceback_preserved_from_logs")
+
+        mock_args_for_report = argparse.Namespace(
+            execute=True,
+            template_id=26108,
+            startup_timeout_seconds=1200,
+            probe_timeout_seconds=300,
+            instance_market="",
+            confirm_delete=True,
+        )
+        structured_report = build_report(
+            mock_args_for_report,
+            "failed_recovered_from_container_logs",
+            {
+                "template_image_ref": EXPECTED_IMAGE_REF,
+                "effective_image_ref": EXPECTED_IMAGE_REF,
+                "structured_probe_fields": {
+                    "environment": json.dumps({"image_tag": IMAGE_TAG}),
+                    "exception_type": "ModuleNotFoundError",
+                    "exception_message_json": json.dumps("No module named 'structured_dependency'"),
+                    "exception_traceback_json": json.dumps("Traceback structured"),
+                    "missing_module_name": "structured_dependency",
+                },
+                "exception_type_from_logs": "RuntimeError",
+                "exception_message_from_logs": "log fallback should not win",
+                "traceback_tail": "Traceback fallback should not win",
+            },
+        )
+        assert structured_report["exception_type"] == "ModuleNotFoundError", structured_report
+        assert structured_report["exception_message"] == "No module named 'structured_dependency'", structured_report
+        assert structured_report["exception_traceback"] == "Traceback structured", structured_report
+        assert structured_report["missing_module_name"] == "structured_dependency", structured_report
+        assert structured_report["template_image_ref"] == EXPECTED_IMAGE_REF, structured_report
+        assert structured_report["tag_audit_status"] == "match", structured_report
+        announce("build_report_prefers_structured_exception_and_preserves_template_image")
+
+        fallback_report = build_report(
+            mock_args_for_report,
+            "failed_recovered_from_container_logs",
+            {
+                "template_image_ref": EXPECTED_IMAGE_REF,
+                "effective_image_ref": EXPECTED_IMAGE_REF,
+                "structured_probe_fields": {
+                    "environment": json.dumps({"image_tag": IMAGE_TAG}),
+                    "exception_type": "",
+                    "exception_message_json": json.dumps("No module named 'json_fallback_dependency'"),
+                    "exception_traceback_json": json.dumps("Traceback json fallback"),
+                },
+                "exception_type_from_logs": "ModuleNotFoundError",
+                "exception_message_from_logs": "No module named 'log_dependency'",
+                "traceback_tail": "Traceback log fallback",
+            },
+        )
+        assert fallback_report["exception_type"] == "ModuleNotFoundError", fallback_report
+        assert fallback_report["exception_message"] == "No module named 'json_fallback_dependency'", fallback_report
+        assert fallback_report["exception_traceback"] == "Traceback json fallback", fallback_report
+        announce("build_report_json_fields_fallback_without_empty_overwrite")
+
+        mismatch_report = build_report(
+            mock_args_for_report,
+            "image_mismatch",
+            {
+                "template_image_ref": EXPECTED_IMAGE_REF,
+                "effective_image_ref": "ghcr.io/fernandoreisdasilva/ayl-simplepod-wan22-s2v-fastapi-v2:0.3.04-blackwell-fp8-wan-gate0-mount-audit-v1",
+                "structured_probe_fields": {"environment": json.dumps({"image_tag": IMAGE_TAG})},
+            },
+        )
+        assert mismatch_report["tag_audit_status"] == "mismatch", mismatch_report
+        announce("build_report_tag_audit_mismatch_detected")
 
         require_classification(
             "startup_classification_created_pure",
@@ -2269,6 +2403,21 @@ def main() -> int:
             "request": safe_result(template_result),
             "image_extraction": extract_effective_image_ref(template_result.get("json")),
         }
+        data["template_image_ref"] = data["template_result"]["image_extraction"].get("effective_image_ref", "")
+        if data["template_image_ref"] and data["template_image_ref"] != EXPECTED_IMAGE_REF:
+            status = "image_mismatch"
+            data["image_verification"] = {
+                "status": "template_image_mismatch",
+                "expected_image_ref": EXPECTED_IMAGE_REF,
+                "template_image_ref": data["template_image_ref"],
+            }
+            data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
+            write_json(REPORT_PATH, build_report(args, status, data))
+            print_status(
+                f"[{SCRIPT_ID}] DONE status={status} expected_image_ref={EXPECTED_IMAGE_REF} "
+                f"template_image_ref={data['template_image_ref']} report={REPORT_PATH}"
+            )
+            return 1
 
         if args.instance_market:
             selected = {
@@ -2412,6 +2561,9 @@ def main() -> int:
                 status = "succeeded_recovered_from_container_logs"
             elif log_certification == "FAIL" or log_collection.get("failure_markers"):
                 status = "failed_recovered_from_container_logs"
+            preview_report = build_report(args, status, data)
+            if preview_report.get("internal_image_tag") and preview_report.get("tag_audit_status") == "mismatch":
+                status = "image_mismatch"
             data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
             write_json(REPORT_PATH, build_report(args, status, data))
             print(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}", flush=True)
@@ -2509,6 +2661,9 @@ def main() -> int:
             status = "failed_recovered_from_container_logs"
         elif status == "probe_timeout" and not log_collection.get("container_logs_retrieved"):
             status = "probe_timeout"
+        preview_report = build_report(args, status, data)
+        if preview_report.get("internal_image_tag") and preview_report.get("tag_audit_status") == "mismatch":
+            status = "image_mismatch"
         data["runtime_seconds"] = round(time.monotonic() - started_monotonic, 3)
         write_json(REPORT_PATH, build_report(args, status, data))
         print(f"[{SCRIPT_ID}] DONE status={status} report={REPORT_PATH}", flush=True)
