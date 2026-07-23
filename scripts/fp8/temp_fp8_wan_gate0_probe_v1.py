@@ -25,7 +25,7 @@ DEFAULT_IMAGE_TAG = os.getenv("AYL_IMAGE_TAG", "0.3.08-blackwell-fp8-wan-gate0-d
 DEFAULT_WAN_COMMIT = os.getenv("AYL_WAN22_GIT_COMMIT", "42bf4cfaa384bc21833865abc2f9e6c0e67233dc")
 TASK = "s2v-14B"
 MIN_LINEAR_PARAMS = int(os.getenv("AYL_FP8_GATE0_MIN_LINEAR_PARAMS", "16384"))
-DEFAULT_INFER_FRAMES = int(os.getenv("AYL_FP8_GATE0_INFER_FRAMES", "1"))
+DEFAULT_INFER_FRAMES = int(os.getenv("AYL_FP8_GATE0_INFER_FRAMES", "4"))
 DEFAULT_MAX_AREA = int(os.getenv("AYL_FP8_GATE0_MAX_AREA", str(256 * 256)))
 LOADER_ENTRYPOINT = "wan.speech2video.WanS2V"
 LOADER_REQUIRED_RELATIVE_PATHS = (
@@ -587,6 +587,14 @@ def stage_seconds(started: float) -> float:
     return round(time.monotonic() - started, 6)
 
 
+def validate_wan_s2v_infer_frames(infer_frames: int) -> None:
+    if infer_frames < 4 or infer_frames % 4 != 0:
+        raise ValueError(
+            "Wan S2V requires infer_frames >= 4 and divisible by 4; "
+            f"received infer_frames={infer_frames}. Smaller values can produce zero temporal latent frames."
+        )
+
+
 def initial_report(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "script_id": SCRIPT_ID,
@@ -1107,6 +1115,8 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
                 f"status={quantization['status']} module_tree_preserved={before_signature == after_signature}"
             )
 
+        infer_frames = int(args.infer_frames)
+        validate_wan_s2v_infer_frames(infer_frames)
         image_path, audio_path = create_minimal_inputs(Path(args.work_dir))
         emit_stage("first_inference_started")
         inference_started = time.monotonic()
@@ -1121,7 +1131,7 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
             num_repeat=None,
             pose_video=None,
             max_area=int(args.max_area),
-            infer_frames=int(args.infer_frames),
+            infer_frames=infer_frames,
             shift=4.0,
             sample_solver="unipc",
             sampling_steps=1,
@@ -1136,7 +1146,7 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
             "status": "succeeded",
             "output_type": type(video).__name__,
             "output_shape": list(getattr(video, "shape", []) or []),
-            "infer_frames": int(args.infer_frames),
+            "infer_frames": infer_frames,
             "max_area": int(args.max_area),
             "video_saved": False,
             "quality_measured": False,
@@ -1578,13 +1588,20 @@ def run_mock_gate0(args: argparse.Namespace) -> dict[str, Any]:
         report["timings"]["quantization_seconds"] = 0.1
         report["memory"]["cuda_memory_after_quantization"] = {"allocated_gb": 32.0, "reserved_gb": 42.0, "peak_allocated_gb": 40.0}
         emit_stage("cuda_memory_after_quantization", allocated=32.0, reserved=42.0)
+        infer_frames = int(args.infer_frames)
+        validate_wan_s2v_infer_frames(infer_frames)
         emit_stage("first_inference_started")
         if args.mock_stage == "inference_failure":
             report["first_inference"] = {"status": "failed"}
             report["failure_stage"] = "first_inference"
             report["status"] = "failed"
         else:
-            report["first_inference"] = {"status": "succeeded", "output_type": "Tensor", "output_shape": [1, 3, 1, 16, 16]}
+            report["first_inference"] = {
+                "status": "succeeded",
+                "output_type": "Tensor",
+                "output_shape": [1, 3, infer_frames, 16, 16],
+                "infer_frames": infer_frames,
+            }
             report["timings"]["first_inference_seconds"] = 0.1
             report["status"] = "succeeded"
             emit_stage("first_inference_finished", first_inference_seconds=0.1)
@@ -1606,7 +1623,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wan-repo-dir", type=Path, default=DEFAULT_WAN_REPO_DIR)
     parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
     parser.add_argument("--work-dir", type=Path, default=Path("/tmp/fp8_wan_gate0_probe_v1"))
-    parser.add_argument("--infer-frames", type=int, default=DEFAULT_INFER_FRAMES)
+    parser.add_argument(
+        "--infer-frames",
+        type=int,
+        default=DEFAULT_INFER_FRAMES,
+        help="Minimal Wan S2V inference frame count. Must be >= 4 and divisible by 4.",
+    )
     parser.add_argument("--max-area", type=int, default=DEFAULT_MAX_AREA)
     parser.add_argument("--mock-stage", default="", help=argparse.SUPPRESS)
     parser.add_argument("--run-mock-tests", action="store_true", help=argparse.SUPPRESS)
