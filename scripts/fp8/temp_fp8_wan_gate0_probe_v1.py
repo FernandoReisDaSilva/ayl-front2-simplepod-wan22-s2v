@@ -88,6 +88,49 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def emit_recovery_report(report: dict[str, Any]) -> None:
+    """Emit a compact JSON report that survives API log-only recovery."""
+    fp8_quantization = report.get("fp8_quantization", {})
+    error_summaries = [
+        {
+            "stage": item.get("stage"),
+            "exception_type": item.get("exception_type") or item.get("error_type"),
+            "exception_message": truncate(item.get("exception_message", "") or item.get("error_truncated", ""), 1000),
+            "missing_path": item.get("missing_path", ""),
+            "missing_module_name": item.get("missing_module_name", ""),
+        }
+        for item in (report.get("errors", []) or [])[:3]
+        if isinstance(item, dict)
+    ]
+    recovery_report = {
+        "script_id": SCRIPT_ID,
+        "report_kind": "fp8_wan_gate0_recovery_report_v1",
+        "probe_build_id": report.get("probe_build_id"),
+        "report_schema_version": report.get("report_schema_version"),
+        "status": report.get("status"),
+        "runtime_certification": report.get("runtime_certification"),
+        "failure_stage": report.get("failure_stage", ""),
+        "exception_type": report.get("exception_type", ""),
+        "exception_message": truncate(report.get("exception_message", ""), 1000),
+        "environment": report.get("environment", {}),
+        "config": report.get("config", {}),
+        "wan_load": report.get("wan_load", {}),
+        "fp8_quantization": {
+            "status": fp8_quantization.get("status"),
+            "quantized_count": len(fp8_quantization.get("quantized_modules", []) or []),
+            "failed_count": len(fp8_quantization.get("failed_modules", []) or []),
+            "module_tree_preserved": fp8_quantization.get("module_tree_preserved"),
+            "linear_count_before": fp8_quantization.get("linear_count_before"),
+            "linear_count_after": fp8_quantization.get("linear_count_after"),
+        },
+        "first_inference": report.get("first_inference", {}),
+        "memory": report.get("memory", {}),
+        "timings": report.get("timings", {}),
+        "errors": error_summaries,
+    }
+    print(json.dumps(recovery_report, ensure_ascii=False, sort_keys=True, separators=(",", ":")), flush=True)
+
+
 def truncate(value: Any, limit: int = 2000) -> str:
     text = str(value)
     return text if len(text) <= limit else text[:limit] + "...<truncated>"
@@ -1195,6 +1238,7 @@ def run_gate0(args: argparse.Namespace) -> dict[str, Any]:
         report["runtime_certification"] = "PASS" if report.get("status") == "succeeded" else "FAIL"
         write_json(args.report_path, report)
         emit_stage("report_written", report=args.report_path)
+        emit_recovery_report(report)
         emit_stage("runtime_certification=" + report["runtime_certification"])
         emit_stage("probe_exit", exit_code=0 if report["runtime_certification"] == "PASS" else 1)
     return report
@@ -1612,6 +1656,7 @@ def run_mock_gate0(args: argparse.Namespace) -> dict[str, Any]:
     report["runtime_certification"] = "PASS" if report["status"] == "succeeded" else "FAIL"
     write_json(args.report_path, report)
     emit_stage("report_written", report=args.report_path)
+    emit_recovery_report(report)
     emit_stage("runtime_certification=" + report["runtime_certification"])
     emit_stage("probe_exit", exit_code=0 if report["runtime_certification"] == "PASS" else 1)
     return report

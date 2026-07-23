@@ -508,6 +508,7 @@ def runtime_payload(instance_market: str, template_id: int) -> dict:
         "instanceMarket": instance_market or "<selected_fp8_probe_market>",
         "instanceTemplate": f"/instances/templates/{template_id}",
         "envVariables": [
+            {"name": "AYL_FP8_WAN_GATE0_REPORT_PATH", "value": PROBE_REPORT_PATH},
             {"name": "AYL_FP8_PROBE_REPORT_PATH", "value": PROBE_REPORT_PATH},
             {"name": "AYL_FP8_CERTIFICATION_REPORT_PATH", "value": CERTIFICATION_REPORT_PATH},
             {"name": "PYTHONUNBUFFERED", "value": "1"},
@@ -1845,6 +1846,8 @@ def run_mock_tests() -> int:
 
         payload = runtime_payload("/instances/market/mock", 26108)
         env_names = {item.get("name") for item in payload.get("envVariables", [])}
+        assert "AYL_FP8_WAN_GATE0_REPORT_PATH" in env_names, payload
+        assert "AYL_FP8_PROBE_REPORT_PATH" in env_names, payload
         assert "AYL_IMAGE_TAG" not in env_names, payload
         assert "AYL_RUNTIME_VERSION" not in env_names, payload
         payload_text = json.dumps(smoke.redact_value("payload", payload), ensure_ascii=False)
@@ -2298,6 +2301,25 @@ def run_mock_tests() -> int:
         assert result["status"] == "completed", result
         assert result["runtime_certification_value"] == "PASS", result
         announce("probe_monitor_json_pass")
+
+        recovery_json_log = json.dumps(
+            {
+                "script_id": "TEMP_FP8_WAN_GATE0_PROBE_V1",
+                "report_kind": "fp8_wan_gate0_recovery_report_v1",
+                "status": "succeeded",
+                "runtime_certification": "PASS",
+                "first_inference": {"status": "succeeded", "infer_frames": 4},
+            },
+            separators=(",", ":"),
+        )
+        result, _calls = run_monitor_mock(
+            [running_empty],
+            [recovery_json_log],
+        )
+        assert result["status"] == "completed", result
+        assert result["report_found"] is True, result
+        assert result["fp8_runtime_report"]["report_kind"] == "fp8_wan_gate0_recovery_report_v1", result
+        announce("probe_monitor_gate0_recovery_json_from_logs")
 
         start_scripts = make_mock_instance("running", "Running start scripts...\n")
         result, calls = run_monitor_mock(
