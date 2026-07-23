@@ -9,6 +9,7 @@ complete enough to import the Wan S2V entrypoints used by Gate 0.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import json
 import os
@@ -96,6 +97,60 @@ def import_module(name: str) -> dict[str, Any]:
             "error_truncated": str(exc)[:500],
             "traceback_tail": traceback.format_exc()[-2000:],
         }
+
+
+def is_missing_nvidia_driver_error(result: dict[str, Any]) -> bool:
+    message = str(result.get("error_truncated") or "")
+    traceback_tail = str(result.get("traceback_tail") or "")
+    return (
+        result.get("error_type") == "RuntimeError"
+        and "Found no NVIDIA driver on your system" in f"{message}\n{traceback_tail}"
+    )
+
+
+def clear_wan_modules() -> None:
+    for module_name in list(sys.modules):
+        if module_name == "generate" or module_name == "wan" or module_name.startswith("wan."):
+            sys.modules.pop(module_name, None)
+
+
+@contextlib.contextmanager
+def temporary_current_device_patch():
+    import torch
+
+    original_current_device = torch.cuda.current_device
+
+    def import_only_current_device() -> int:
+        return 0
+
+    torch.cuda.current_device = import_only_current_device
+    try:
+        yield
+    finally:
+        torch.cuda.current_device = original_current_device
+
+
+def import_wan_module(name: str, *, allow_current_device_patch: bool) -> tuple[dict[str, Any], str]:
+    native_result = import_module(name)
+    if native_result["status"] == "ok":
+        return native_result, "native"
+
+    if not allow_current_device_patch or not is_missing_nvidia_driver_error(native_result):
+        return native_result, "native"
+
+    clear_wan_modules()
+    try:
+        with temporary_current_device_patch():
+            patched_result = import_module(name)
+    finally:
+        clear_wan_modules()
+
+    patched_result["native_import_error"] = {
+        "error_type": native_result.get("error_type", ""),
+        "error_truncated": native_result.get("error_truncated", ""),
+        "traceback_tail": native_result.get("traceback_tail", ""),
+    }
+    return patched_result, "temporary_current_device_patch"
 
 
 def torchvision_c_extension_status() -> dict[str, Any]:
@@ -262,6 +317,8 @@ def dependency_validation_summary(report: dict[str, Any]) -> dict[str, Any]:
         },
         "torchvision_ops_ok": bool(torch_stack.get("torchvision_ops_ok")),
         "wan_import_ok": wan_s2v.get("status") == "ok",
+        "wan_import_mode": report.get("wan_import_mode", ""),
+        "wan_import_strategy": report.get("wan_import_strategy", ""),
         "result": result,
         "status": status,
         "error_type": report.get("error_type") or torch_stack.get("error_type") or wan_s2v.get("error_type"),
@@ -313,6 +370,8 @@ def main() -> int:
         "generates_video": False,
         "imports": [],
         "wan_imports": [],
+        "wan_import_mode": "not_started",
+        "wan_import_strategy": "not_started",
         "status": "not_started",
     }
 
@@ -395,10 +454,20 @@ def main() -> int:
         print(json.dumps(report, sort_keys=True))
         return 1
 
+    wan_import_mode = "gpu_runtime" if report["torch_stack"].get("torch_cuda_is_available") else "import_only_cuda_unavailable"
+    wan_import_strategy = "native"
+
     for name in WAN_IMPORTS:
-        result = import_module(name)
+        result, strategy = import_wan_module(
+            name,
+            allow_current_device_patch=wan_import_mode == "import_only_cuda_unavailable",
+        )
+        if strategy == "temporary_current_device_patch":
+            wan_import_strategy = strategy
         report["wan_imports"].append(result)
         if result["status"] != "ok":
+            report["wan_import_mode"] = wan_import_mode
+            report["wan_import_strategy"] = wan_import_strategy
             report["status"] = "failed_wan_import"
             write_report(args.report_path, report)
             print(f"[{SCRIPT_ID}] FAILED status={report['status']} module={name} error={result.get('error_type')}: {result.get('error_truncated')}")
@@ -406,10 +475,18 @@ def main() -> int:
             return 1
 
     try:
-        from wan.speech2video import WanS2V  # noqa: F401
+        if wan_import_strategy == "temporary_current_device_patch":
+            with temporary_current_device_patch():
+                from wan.speech2video import WanS2V  # noqa: F401
+        else:
+            from wan.speech2video import WanS2V  # noqa: F401
 
+        report["wan_import_mode"] = wan_import_mode
+        report["wan_import_strategy"] = wan_import_strategy
         report["wan_s2v_import"] = {"status": "ok", "symbol": "WanS2V"}
     except Exception as exc:  # noqa: BLE001 - this is a diagnostic smoke.
+        report["wan_import_mode"] = wan_import_mode
+        report["wan_import_strategy"] = wan_import_strategy
         report["wan_s2v_import"] = {
             "status": "failed",
             "error_type": type(exc).__name__,
